@@ -1,0 +1,45 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "vouchervault-mcp"
+version = "0.1.0"
+description = "MCP server for VoucherVault voucher/coupon management"
+readme = "README.md"
+requires-python = ">=3.11"
+license = { text = "MIT" }
+keywords = ["mcp", "vouchervault", "voucher", "coupon"]
+dependencies = [
+    "fastmcp>=2.0.0",
+    "httpx>=0.27.0",
+    "beautifulsoup4>=4.12.0",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=8.0",
+    "pytest-asyncio>=0.23",
+    "bandit>=1.7",
+    "ruff>=0.5",
+]
+
+[project.scripts]
+vouchervault-mcp = "vouchervault_mcp.server:main"
+
+[tool.hatch.build.targets.wheel]
+packages = ["vouchervault_mcp"]
+
+[tool.pytest.ini_options]
+asyncio_mode = "auto"
+testpaths = ["tests"]
+
+[tool.ruff]
+line-length = 100
+
+[tool.ruff.lint]
+# DTZ ignored intentionally: VoucherVault stores plain dates; expiry math and
+# defaults are date-only (naive) by design.
+# EXE002 ignored: this repo is developed on a Windows 9p mount where every
+# file reports as executable regardless of mode bits.
+ignore = ["DTZ", "EXE002"]
