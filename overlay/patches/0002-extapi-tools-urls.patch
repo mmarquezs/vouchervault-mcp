@@ -1,0 +1,9 @@
+diff --git a/myproject/urls.py b/myproject/urls.py
+index 3c97f06..ba66064 100644
+--- a/myproject/urls.py
++++ b/myproject/urls.py
+@@ -38,3 +38,4 @@ if settings.OIDC_ENABLED:
+     urlpatterns.append(path('oidc/', include('mozilla_django_oidc.urls')))
+ # extapi: token-authenticated item API overlay (files/docker/docker/vouchervault/)
+ urlpatterns.append(path("api/v1/", include("extapi.urls")))
++urlpatterns.append(path("tools/", include("extapi.tools_urls")))

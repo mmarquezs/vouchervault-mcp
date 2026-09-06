@@ -1,0 +1,18 @@
+diff --git a/myapp/templates/base.html b/myapp/templates/base.html
+index 0571e83..f3dde11 100644
+--- a/myapp/templates/base.html
++++ b/myapp/templates/base.html
+@@ -302,6 +302,13 @@
+         </a>
+       </li>      
+ 
++      <li class="nav-item">
++        <a class="nav-link " href="/tools/setup">
++          <i class="bi bi-puzzle"></i>
++          <span>Checkout helper</span>
++        </a>
++      </li>
++
+       <li class="nav-heading">{% trans "Functions" %}</li>
+ 
+       <li class="nav-item">
