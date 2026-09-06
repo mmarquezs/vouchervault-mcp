@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         VoucherVault Checkout Reminder
 // @namespace    https://curiositystream.stream/
-// @version      1.5.0
+// @version      1.5.1
 // @description  Shows VoucherVault coupon codes matching the merchant you are currently visiting (checkout reminder)
 // @license      MIT
 // @match        https://*/*
@@ -690,7 +690,7 @@
 
     const pill = document.createElement("div");
     pill.className = "pill pill-cta";
-    pill.textContent = "\uD83C\uDF9F " + coupons.length + " coupon" + (coupons.length === 1 ? "" : "s") + " for " + registrable + " \u25BE";
+    pill.textContent = "\uD83C\uDF9F " + coupons.length + " coupon" + (coupons.length === 1 ? "" : "s");
 
     const expanded = document.createElement("div");
     expanded.className = "panel" + (startExpanded ? " vv-enter" : "");
@@ -700,8 +700,8 @@
     head.className = "head";
     head.title = "Collapse to the pill";
     const headLabel = document.createElement("span");
-    headLabel.textContent = coupons.length + " coupon" + (coupons.length === 1 ? "" : "s") + " for " + registrable;
-    const chev = mk("span", "chev", "\u25B4");
+    headLabel.textContent = coupons.length + " coupon" + (coupons.length === 1 ? "" : "s");
+    const chev = mk("span", "chev", "\u25BE");
     head.appendChild(headLabel);
     head.appendChild(chev);
     expanded.appendChild(head);
