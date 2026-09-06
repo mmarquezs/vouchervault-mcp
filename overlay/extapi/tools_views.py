@@ -16,6 +16,7 @@ client-side scripting.
 """
 
 import html
+import os
 import pathlib
 
 from django.http import HttpResponse
@@ -24,16 +25,42 @@ _USERSCRIPT_NAME = "vouchervault-checkout.user.js"
 # The Dockerfile copies the userscript next to this package:
 # /opt/app/extapi/vouchervault-checkout.user.js
 _USERSCRIPT_PATH = pathlib.Path(__file__).parent / _USERSCRIPT_NAME
+# Live-mount override (env EXTAPI_LIVE_USERSCRIPT): when the deployment
+# bind-mounts a userscript at this path, it is served instead of the
+# image-baked copy — the live mount enables no-rebuild iteration; the
+# bundled copy is the pinned fallback.
+_LIVE_USERSCRIPT_PATH = pathlib.Path(
+    os.environ.get(
+        "EXTAPI_LIVE_USERSCRIPT",
+        "/opt/app/userscript-live/vouchervault-checkout.user.js",
+    )
+)
+
+
+def _read_userscript() -> bytes:
+    """Return userscript bytes, read fresh per request (nothing cached).
+
+    Prefers the live-mount file (present and readable); falls back to the
+    bundled copy otherwise.
+    """
+    if _LIVE_USERSCRIPT_PATH.is_file():
+        try:
+            return _LIVE_USERSCRIPT_PATH.read_bytes()
+        except OSError:
+            pass  # unreadable live copy — serve the bundled one instead
+    return _USERSCRIPT_PATH.read_bytes()
 
 
 def userscript(request):
     """GET /tools/vouchervault-checkout.user.js — download the userscript.
 
     No auth (the file contains no secrets) and only ``Cache-Control:
-    no-cache`` so updates propagate without user action.
+    no-cache`` so updates propagate without user action. The live-mount
+    copy (see ``_LIVE_USERSCRIPT_PATH``) is served when present; the
+    bundled copy is the pinned fallback.
     """
     return HttpResponse(
-        _USERSCRIPT_PATH.read_bytes(),
+        _read_userscript(),
         content_type="application/javascript",
         headers={
             "Content-Disposition": f'inline; filename="{_USERSCRIPT_NAME}"',

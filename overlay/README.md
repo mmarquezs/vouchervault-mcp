@@ -15,6 +15,8 @@ The overlay also serves the [checkout userscript](userscript/vouchervault-checko
 
 Both routes are public by design — the script contains no secrets; it prompts the user for their VoucherVault URL / username / API token on first run (token from VoucherVault admin → API Settings). The userscript is original MIT-licensed code and lives in `userscript/`; the deployment copies it next to the `extapi` package so `tools_views.py` can serve it via `Path(__file__).parent`.
 
+For no-rebuild userscript iteration, the deployment can bind-mount a host copy of the script read-only into the container and point the view at it via the `EXTAPI_LIVE_USERSCRIPT` env var (default `/opt/app/userscript-live/vouchervault-checkout.user.js`): when that file exists and is readable it is served instead of the image-baked copy — same headers, read fresh on every request with nothing cached — while the bundled copy remains the pinned fallback.
+
 ## Install (manual)
 
 From this repository, copy the package next to the VoucherVault app root (so that `extapi/` sits alongside `myapp/` and `myproject/`), then apply the patches from the app root:
