@@ -64,9 +64,9 @@ Or with `uvx`:
 
 ## How it works — token API (extapi overlay)
 
-VoucherVault upstream exposes **no write REST API**. This deployment adds the
-`extapi` overlay patch (maintained in the ansible repo and applied on top of
-the pinned upstream image), which provides a token-authenticated JSON API.
+VoucherVault upstream exposes **no write REST API**. This repository publishes
+the `extapi` overlay ([`overlay/`](overlay/)) — a token-authenticated JSON API
+applied on top of the pinned upstream image.
 The server talks only to that API — the base URL is the **internal container
 URL** (e.g. `http://vouchervault.internal:8000`), and every call carries
 `Authorization: Bearer ${VOUCHERVAULT_API_TOKEN}` (the same token the legacy
@@ -142,4 +142,10 @@ vouchervault-mcp
 
 ## License
 
-MIT
+MIT — applies to the MCP client (the `vouchervault_mcp` package and tests in
+this repository).
+
+The [`overlay/`](overlay/) directory is **GPL-3.0**: it is a derivative of
+[VoucherVault](https://github.com/l4rm4nd/VoucherVault) (see
+[`overlay/LICENSE`](overlay/LICENSE)); per-file attribution headers note the
+upstream copyright.
