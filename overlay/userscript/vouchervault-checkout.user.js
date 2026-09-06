@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         VoucherVault Checkout Reminder
 // @namespace    https://curiositystream.stream/
-// @version      1.0.0
+// @version      1.1.0
 // @description  Shows VoucherVault coupon codes matching the merchant you are currently visiting (checkout reminder)
 // @license      MIT
 // @match        https://*/*
@@ -13,6 +13,11 @@
 // @grant        GM_setValue
 // @grant        GM_setClipboard
 // @grant        GM_registerMenuCommand
+// @grant        GM.getValue
+// @grant        GM.setValue
+// @grant        GM.xmlHttpRequest
+// @grant        GM.setClipboard
+// @grant        GM.registerMenuCommand
 // ==/UserScript==
 
 /*
@@ -42,26 +47,36 @@
   const FETCH_TIMEOUT_MS = 15000;
   const CACHE_TTL_MS = 6 * 60 * 60 * 1000; // 6h
 
+  // --------------------------------------------------- GM API compatibility
+  // Greasemonkey 4 renamed the sync GM_* APIs to async GM.* ones. Support both.
+  const GMAPI = {
+    get: (k, d) => (typeof GM !== "undefined" && GM.getValue ? GM.getValue(k, d) : Promise.resolve(GM_getValue(k, d))),
+    set: (k, v) => (typeof GM !== "undefined" && GM.setValue ? GM.setValue(k, v) : Promise.resolve(GM_setValue(k, v))),
+    xhr: (o) => (typeof GM !== "undefined" && GM.xmlHttpRequest ? GM.xmlHttpRequest(o) : GM_xmlhttpRequest(o)),
+    clipboard: (t) => (typeof GM !== "undefined" && GM.setClipboard ? GM.setClipboard(t) : (typeof GM_setClipboard === "function" ? GM_setClipboard(t) : navigator.clipboard.writeText(t))),
+    menu: (label, fn) => { if (typeof GM !== "undefined" && GM.registerMenuCommand) { GM.registerMenuCommand(label, fn); } else if (typeof GM_registerMenuCommand === "function") { GM_registerMenuCommand(label, fn); } }
+  };
+
   // ---------------------------------------------------------------- config
 
-  function getConfig() {
-    const url = GM_getValue("vv_url", "");
-    const token = GM_getValue("vv_token", "");
-    const user = GM_getValue("vv_user", "");
+  async function getConfig() {
+    const url = await GMAPI.get("vv_url", "");
+    const token = await GMAPI.get("vv_token", "");
+    const user = await GMAPI.get("vv_user", "");
     if (!url || !token || !user) return null;
     return { url: String(url).replace(/\/+$/, ""), token, user };
   }
 
-  function promptForConfig() {
-    const url = (window.prompt("VoucherVault base URL (e.g. https://vouchervault.example.com)", GM_getValue("vv_url", "")) || "").trim();
+  async function promptForConfig() {
+    const url = (window.prompt("VoucherVault base URL (e.g. https://vouchervault.example.com)", await GMAPI.get("vv_url", "")) || "").trim();
     if (!url) return null;
-    const user = (window.prompt("VoucherVault username", GM_getValue("vv_user", "")) || "").trim();
+    const user = (window.prompt("VoucherVault username", await GMAPI.get("vv_user", "")) || "").trim();
     if (!user) return null;
     const token = (window.prompt("VoucherVault API token", "") || "").trim();
     if (!token) return null;
-    GM_setValue("vv_url", url);
-    GM_setValue("vv_user", user);
-    GM_setValue("vv_token", token);
+    await GMAPI.set("vv_url", url);
+    await GMAPI.set("vv_user", user);
+    await GMAPI.set("vv_token", token);
     return getConfig();
   }
 
@@ -127,17 +142,17 @@
     return expiry >= todayISO();
   }
 
-  function fetchCoupons(force) {
-    const config = getConfig();
-    if (!config) return Promise.reject(new Error("not configured"));
+  async function fetchCoupons(force) {
+    const config = await getConfig();
+    if (!config) throw new Error("not configured");
 
-    const cached = GM_getValue("vv_cache", null);
+    const cached = await GMAPI.get("vv_cache", null);
     if (!force && cached && Date.now() - cached.ts < CACHE_TTL_MS) {
-      return Promise.resolve(cached.data);
+      return cached.data;
     }
 
     return new Promise((resolve, reject) => {
-      GM_xmlhttpRequest({
+      GMAPI.xhr({
         method: "GET",
         url: config.url + "/api/get/stats?user=" + encodeURIComponent(config.user),
         headers: { Authorization: "Bearer " + config.token },
@@ -145,7 +160,7 @@
         onload: (res) => {
           try {
             const data = JSON.parse(res.responseText);
-            GM_setValue("vv_cache", { ts: Date.now(), data });
+            GMAPI.set("vv_cache", { ts: Date.now(), data });
             resolve(data);
           } catch (e) {
             reject(e);
@@ -316,7 +331,7 @@
       copy.className = "copy";
       copy.textContent = "Copy";
       copy.addEventListener("click", () => {
-        GM_setClipboard(String(item.code || ""));
+        GMAPI.clipboard(String(item.code || ""));
         copy.textContent = "\u2713";
         setTimeout(() => { copy.textContent = "Copy"; }, 1200);
       });
@@ -370,29 +385,33 @@
 
   // ---------------------------------------------------------------- boot
 
-  GM_registerMenuCommand("Configure VoucherVault", () => {
-    const config = promptForConfig();
-    if (!config) return;
-    fetchCoupons(true).then((data) => render(matchingCoupons(data))).catch(() => {});
+  GMAPI.menu("Configure VoucherVault", () => {
+    (async () => {
+      const config = await promptForConfig();
+      if (!config) return;
+      fetchCoupons(true).then((data) => render(matchingCoupons(data))).catch(() => {});
+    })();
   });
 
-  GM_registerMenuCommand("Refresh coupon data now", () => {
+  GMAPI.menu("Refresh coupon data now", () => {
     fetchCoupons(true).then((data) => {
       document.getElementById("vv-checkout-reminder-host")?.remove();
       render(matchingCoupons(data));
     }).catch(() => {});
   });
 
-  const config = getConfig();
-  if (!config) {
-    // First run: collect config once, then proceed
-    const first = promptForConfig();
-    if (!first) return;
-  }
+  (async () => {
+    const config = await getConfig();
+    if (!config) {
+      // First run: collect config once, then proceed
+      const first = await promptForConfig();
+      if (!first) return;
+    }
 
-  fetchCoupons(false)
-    .then((data) => render(matchingCoupons(data)))
-    .catch(() => {
-      /* silent: no codes in logs, no noise on unrelated sites */
-    });
+    fetchCoupons(false)
+      .then((data) => render(matchingCoupons(data)))
+      .catch(() => {
+        /* silent: no codes in logs, no noise on unrelated sites */
+      });
+  })();
 })();
