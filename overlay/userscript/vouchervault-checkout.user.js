@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         VoucherVault Checkout Reminder
 // @namespace    https://curiositystream.stream/
-// @version      1.2.0
+// @version      1.2.1
 // @description  Shows VoucherVault coupon codes matching the merchant you are currently visiting (checkout reminder)
 // @license      MIT
 // @match        https://*/*
@@ -340,7 +340,7 @@
     const host = document.createElement("div");
     host.id = id;
     host.style.cssText =
-      "position:fixed;bottom:16px;right:16px;z-index:2147483647;all:initial;font-family:system-ui,-apple-system,sans-serif;";
+      "all:initial;position:fixed;bottom:16px;right:16px;z-index:2147483647;display:block;width:auto;height:auto;margin:0;padding:0;font-family:system-ui,-apple-system,sans-serif;";
     const shadow = host.attachShadow({ mode: "closed" });
 
     const style = document.createElement("style");
