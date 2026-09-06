@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         VoucherVault Checkout Reminder
 // @namespace    https://curiositystream.stream/
-// @version      1.2.1
+// @version      1.2.2
 // @description  Shows VoucherVault coupon codes matching the merchant you are currently visiting (checkout reminder)
 // @license      MIT
 // @match        https://*/*
@@ -190,10 +190,13 @@
 
   function formatValue(item) {
     const value = item.value;
-    const type = String(item.type || "").toLowerCase();
     if (value === null || value === undefined || value === "") return "";
-    if (type === "percent" || type === "percentage") {
+    const valueType = String(item.value_type || "").toLowerCase();
+    if (valueType === "percent" || valueType === "percentage") {
       return value + " %";
+    }
+    if (valueType === "multiplier") {
+      return value + "x";
     }
     return value + " " + (item.currency || "EUR");
   }
@@ -421,12 +424,12 @@
       row.className = "row";
       const code = document.createElement("span");
       code.className = "code";
-      code.textContent = String(item.code || "");
+      code.textContent = String(item.redeem_code || item.code || "");
       const copy = document.createElement("button");
       copy.className = "copy";
       copy.textContent = "Copy";
       copy.addEventListener("click", () => {
-        GMAPI.clipboard(String(item.code || ""));
+        GMAPI.clipboard(String(item.redeem_code || item.code || ""));
         copy.textContent = "\u2713";
         setTimeout(() => { copy.textContent = "Copy"; }, 1200);
       });
