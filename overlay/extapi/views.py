@@ -226,6 +226,9 @@ def _create_item(request):
     data.setdefault("value_type", "money")
     data.setdefault("currency", "EUR")
     data.setdefault("issue_date", timezone.localdate().isoformat())
+    # Upstream 1.30.x made code_type a required form field (no model-level
+    # enforcement); the model default is qrcode, so fall back to that.
+    data.setdefault("code_type", "qrcode")
 
     form = ItemForm(data=data)
     if not form.is_valid():
