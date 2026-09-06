@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         VoucherVault Checkout Reminder
 // @namespace    https://curiositystream.stream/
-// @version      1.3.0
+// @version      1.4.0
 // @description  Shows VoucherVault coupon codes matching the merchant you are currently visiting (checkout reminder)
 // @license      MIT
 // @match        https://*/*
@@ -121,6 +121,30 @@
       registrable.endsWith("." + iss) ||
       iss.endsWith("." + registrable)
     );
+  }
+
+  // ------------------------------------------------- checkout URL detection
+
+  // URL keyword prefixes that identify cart / checkout / payment pages.
+  const CHECKOUT_PREFIXES = [
+    "cart", "basket", "cesta", "carrito", "checkout", "payment", "pago",
+    "pay", "billing", "pedido", "order", "onepage", "onestep", "pasarela",
+    "factura",
+  ];
+
+  function startsWithCheckoutPrefix(s) {
+    return CHECKOUT_PREFIXES.some((p) => s.startsWith(p));
+  }
+
+  // True when the current URL looks like a cart/checkout/payment page.
+  // Internal helper — checks the split path segments and, additionally, the
+  // raw pathname with the same prefix logic so glued routes like
+  // /onepagecheckout are caught regardless of segmentation.
+  function isCheckoutUrl() {
+    const pathname = location.pathname.toLowerCase();
+    if (startsWithCheckoutPrefix(pathname.replace(/^\//, ""))) return true;
+    const segments = pathname.split(/[^a-z0-9-]+/);
+    return segments.some(startsWithCheckoutPrefix);
   }
 
   // ---------------------------------------------------------------- data
@@ -359,14 +383,14 @@
     @media (prefers-color-scheme: dark) {
       .panel, .dpanel, .pill:not(.pill-cta) { box-shadow: 0 4px 18px rgba(0,0,0,.55); }
     }
-    /* Chat-style intro: slide up + fade with a tiny overshoot bounce. */
+    /* Panel entrance: slide up + fade with a tiny overshoot bounce. */
     @keyframes vv-enter {
       0% { opacity: 0; transform: translateY(12px); }
       70% { opacity: 1; transform: translateY(-3px); }
       100% { opacity: 1; transform: translateY(0); }
     }
     .vv-enter { animation: vv-enter .5s cubic-bezier(.2,.8,.3,1.15) both; }
-    /* One-time pulse ripple when the intro settles back into the pill. */
+    /* Subtle attention ripple for the collapsed pill (once per browser session). */
     @keyframes vv-pulse {
       0% { box-shadow: 0 0 0 0 var(--vv-accent-glow); }
       100% { box-shadow: 0 0 0 14px rgba(0,0,0,0); }
@@ -429,6 +453,59 @@
     return ((Date.now() - cached.ts) / 3600000).toFixed(1) + " h";
   }
 
+  // ------------------------------------------------------- SPA URL watching
+
+  // Controller for the live coupon panel, replaced on every render().
+  let panelCtl = null;
+
+  // Poll interval handle + state; cleared whenever the panel host leaves the
+  // DOM (hide-until-tomorrow, re-render via makeShadowHost, manual cleanup).
+  let urlWatchTimer = null;
+  let urlWatchState = null;
+
+  function stopUrlWatch() {
+    if (urlWatchTimer !== null) {
+      clearInterval(urlWatchTimer);
+      urlWatchTimer = null;
+    }
+    urlWatchState = null;
+  }
+
+  // SPA frameworks rewrite the URL without a page load. While the coupon
+  // host is in the DOM, poll location.href and expand a collapsed panel when
+  // the user moves from a non-checkout to a checkout URL on the same
+  // hostname. Leaving checkout never force-collapses (user keeps control).
+  function startUrlWatch(host) {
+    stopUrlWatch();
+    urlWatchState = {
+      host,
+      lastHref: location.href,
+      lastHostname: location.hostname,
+      lastCheckout: isCheckoutUrl(),
+    };
+    urlWatchTimer = setInterval(() => {
+      const st = urlWatchState;
+      if (!st) { stopUrlWatch(); return; }
+      // Host removed (hide-until-tomorrow, re-render) → stop polling.
+      if (!st.host.isConnected) { stopUrlWatch(); return; }
+      const href = location.href;
+      if (href === st.lastHref) return;
+      st.lastHref = href;
+      if (location.hostname !== st.lastHostname) {
+        // Cross-host change means a full page load is imminent; resync and ignore.
+        st.lastHostname = location.hostname;
+        st.lastCheckout = isCheckoutUrl();
+        return;
+      }
+      const nowCheckout = isCheckoutUrl();
+      if (nowCheckout && !st.lastCheckout) {
+        const ctl = panelCtl;
+        if (ctl && ctl.host.isConnected && !ctl.isOpen()) ctl.expand();
+      }
+      st.lastCheckout = nowCheckout;
+    }, 800);
+  }
+
   function render(coupons) {
     if (!coupons.length) return;
     const dismissedKey = "vv-dismissed:" + site + ":" + todayISO();
@@ -436,19 +513,20 @@
 
     const { host, root } = makeShadowHost("vv-checkout-reminder-host");
 
-    // Chat-style intro: on the first render for this site+day the panel opens
-    // expanded, then settles back into the pill after a short delay.
-    const introKey = "vv-intro:" + site + ":" + todayISO();
-    const intro = !sessionStorage.getItem(introKey);
-    if (intro) sessionStorage.setItem(introKey, "1");
+    // Attention model (v1.4): no daily intro. On checkout pages the panel
+    // always opens expanded with the entrance animation — checkout visits
+    // are rare and that is the moment this tool exists for. Anywhere else it
+    // stays a collapsed pill that pulses once per browser session so the eye
+    // learns it exists.
+    const startExpanded = isCheckoutUrl();
 
     const pill = document.createElement("div");
     pill.className = "pill pill-cta";
     pill.textContent = "\uD83C\uDF9F " + coupons.length + " coupon" + (coupons.length === 1 ? "" : "s") + " for " + registrable + " \u25BE";
 
     const expanded = document.createElement("div");
-    expanded.className = "panel" + (intro ? " vv-enter" : "");
-    expanded.style.display = intro ? "block" : "none";
+    expanded.className = "panel" + (startExpanded ? " vv-enter" : "");
+    expanded.style.display = startExpanded ? "block" : "none";
 
     const head = document.createElement("div");
     head.className = "head";
@@ -519,7 +597,7 @@
     foot.appendChild(hideToday);
     expanded.appendChild(foot);
 
-    let open = intro;
+    let open = startExpanded;
     pill.style.display = open ? "none" : "flex"; // match initial state
     const setExpanded = (v) => {
       open = v;
@@ -528,27 +606,39 @@
     };
     const toggle = () => setExpanded(!open);
 
-    // Auto-collapse the intro back to the pill after 4s; any click inside the
-    // panel cancels that timer (the user is reading or interacting).
-    if (intro) {
-      const autoCollapse = setTimeout(() => {
-        if (!host.isConnected || !open) return;
-        setExpanded(false);
-        pill.classList.add("vv-pulse");
-      }, 4000);
-      expanded.addEventListener("click", () => clearTimeout(autoCollapse), { once: true });
-    }
+    // Expand with a replayed entrance animation (used by the SPA watcher and
+    // any future collapse → expand cycle).
+    const expandWithAnimation = () => {
+      if (open) return;
+      setExpanded(true);
+      expanded.classList.remove("vv-enter");
+      void expanded.offsetWidth; // force reflow so the animation restarts
+      expanded.classList.add("vv-enter");
+    };
 
     pill.addEventListener("click", toggle);
     head.addEventListener("click", toggle);
     hideToday.addEventListener("click", () => {
       sessionStorage.setItem(dismissedKey, "1");
-      host.remove();
+      host.remove(); // the watcher's isConnected check clears the interval
     });
 
     root.appendChild(pill);
     root.appendChild(expanded);
     document.documentElement.appendChild(host);
+
+    // One subtle pulse per browser session, collapsed non-checkout pill
+    // only — on checkout pages the expanded panel is attention enough.
+    if (!startExpanded) {
+      const noticedKey = "vv-noticed:" + site;
+      if (!sessionStorage.getItem(noticedKey)) {
+        sessionStorage.setItem(noticedKey, "1");
+        pill.classList.add("vv-pulse");
+      }
+    }
+
+    panelCtl = { host, isOpen: () => open, expand: expandWithAnimation };
+    startUrlWatch(host);
   }
 
   // ------------------------------------------------------------ diagnostics
@@ -558,7 +648,7 @@
 
     // Entrance animation only (shared .vv-enter keyframes, reduced-motion
     // aware) — diagnostics never auto-collapses and is unaffected by the
-    // coupon panel's intro logic.
+    // coupon panel's attention/checkout-expansion logic.
     const card = mk("div", "dpanel vv-enter");
 
     const head = mk("div", "dhead");
