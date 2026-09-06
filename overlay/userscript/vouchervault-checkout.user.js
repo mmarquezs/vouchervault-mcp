@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         VoucherVault Checkout Reminder
 // @namespace    https://curiositystream.stream/
-// @version      1.2.2
+// @version      1.3.0
 // @description  Shows VoucherVault coupon codes matching the merchant you are currently visiting (checkout reminder)
 // @license      MIT
 // @match        https://*/*
@@ -203,14 +203,16 @@
 
   function applyTheme(root, dark) {
     const css = dark
-      ? { bg: "#1e1f24", fg: "#e8e8ea", muted: "#a0a2ab", border: "#3a3c44", code: "#111216", accent: "#7aa2f7" }
-      : { bg: "#ffffff", fg: "#1c1e21", muted: "#60636a", border: "#d8dae0", code: "#f2f3f5", accent: "#1a73e8" };
+      ? { bg: "#1e1f24", fg: "#e8e8ea", muted: "#a0a2ab", border: "#3a3c44", code: "#111216", accent: "#4c8dff", accent2: "#2d5fd3", glow: "rgba(76,141,255,.5)" }
+      : { bg: "#ffffff", fg: "#1c1e21", muted: "#60636a", border: "#d8dae0", code: "#f2f3f5", accent: "#1a73e8", accent2: "#1558b8", glow: "rgba(26,115,232,.42)" };
     root.style.setProperty("--vv-bg", css.bg);
     root.style.setProperty("--vv-fg", css.fg);
     root.style.setProperty("--vv-muted", css.muted);
     root.style.setProperty("--vv-border", css.border);
     root.style.setProperty("--vv-code-bg", css.code);
     root.style.setProperty("--vv-accent", css.accent);
+    root.style.setProperty("--vv-accent-2", css.accent2);
+    root.style.setProperty("--vv-accent-glow", css.glow);
   }
 
   const UI_CSS = `
@@ -259,6 +261,33 @@
       line-height: 1;
       padding: 2px 4px;
     }
+    /* Accent-gradient attention pill (coupon reminder only; the error pill
+       keeps the plain dark styling). */
+    .pill-cta {
+      background: linear-gradient(135deg, var(--vv-accent), var(--vv-accent-2));
+      border: 1px solid rgba(255,255,255,.22);
+      color: #ffffff;
+      font-weight: 700;
+      box-shadow: 0 2px 14px var(--vv-accent-glow), 0 4px 20px rgba(0,0,0,.25);
+    }
+    .chev { color: var(--vv-muted); font-size: 12px; }
+    .foot {
+      display: flex;
+      justify-content: flex-end;
+      padding: 8px 12px;
+      border-top: 1px solid var(--vv-border);
+      background: var(--vv-code-bg);
+    }
+    .hide-today {
+      background: none;
+      border: none;
+      padding: 0;
+      color: var(--vv-muted);
+      font-size: 11px;
+      cursor: pointer;
+      text-decoration: underline;
+    }
+    .hide-today:hover { color: var(--vv-fg); }
     .coupon { padding: 10px 12px; border-bottom: 1px solid var(--vv-border); }
     .coupon:last-child { border-bottom: none; }
     .name { font-weight: 600; margin-bottom: 3px; }
@@ -328,7 +357,23 @@
     .verdict.info { color: var(--vv-accent); }
     .verdict.bad { color: #e5484d; }
     @media (prefers-color-scheme: dark) {
-      .panel, .pill, .dpanel { box-shadow: 0 4px 18px rgba(0,0,0,.55); }
+      .panel, .dpanel, .pill:not(.pill-cta) { box-shadow: 0 4px 18px rgba(0,0,0,.55); }
+    }
+    /* Chat-style intro: slide up + fade with a tiny overshoot bounce. */
+    @keyframes vv-enter {
+      0% { opacity: 0; transform: translateY(12px); }
+      70% { opacity: 1; transform: translateY(-3px); }
+      100% { opacity: 1; transform: translateY(0); }
+    }
+    .vv-enter { animation: vv-enter .5s cubic-bezier(.2,.8,.3,1.15) both; }
+    /* One-time pulse ripple when the intro settles back into the pill. */
+    @keyframes vv-pulse {
+      0% { box-shadow: 0 0 0 0 var(--vv-accent-glow); }
+      100% { box-shadow: 0 0 0 14px rgba(0,0,0,0); }
+    }
+    .vv-pulse { animation: vv-pulse .9s ease-out 2; }
+    @media (prefers-reduced-motion: reduce) {
+      .vv-enter, .vv-pulse { animation: none; }
     }
   `;
 
@@ -391,24 +436,28 @@
 
     const { host, root } = makeShadowHost("vv-checkout-reminder-host");
 
+    // Chat-style intro: on the first render for this site+day the panel opens
+    // expanded, then settles back into the pill after a short delay.
+    const introKey = "vv-intro:" + site + ":" + todayISO();
+    const intro = !sessionStorage.getItem(introKey);
+    if (intro) sessionStorage.setItem(introKey, "1");
+
     const pill = document.createElement("div");
-    pill.className = "pill";
+    pill.className = "pill pill-cta";
     pill.textContent = "\uD83C\uDF9F " + coupons.length + " coupon" + (coupons.length === 1 ? "" : "s") + " for " + registrable + " \u25BE";
 
     const expanded = document.createElement("div");
-    expanded.className = "panel";
-    expanded.style.display = "none";
+    expanded.className = "panel" + (intro ? " vv-enter" : "");
+    expanded.style.display = intro ? "block" : "none";
 
     const head = document.createElement("div");
     head.className = "head";
+    head.title = "Collapse to the pill";
     const headLabel = document.createElement("span");
     headLabel.textContent = coupons.length + " coupon" + (coupons.length === 1 ? "" : "s") + " for " + registrable;
-    const dismiss = document.createElement("button");
-    dismiss.className = "dismiss";
-    dismiss.title = "Hide for today";
-    dismiss.textContent = "\u00D7";
+    const chev = mk("span", "chev", "\u25B4");
     head.appendChild(headLabel);
-    head.appendChild(dismiss);
+    head.appendChild(chev);
     expanded.appendChild(head);
 
     for (const item of coupons) {
@@ -463,15 +512,36 @@
       expanded.appendChild(box);
     }
 
-    let open = false;
-    const toggle = () => {
-      open = !open;
+    // Footer: explicit per-day hide, decoupled from collapsing to the pill.
+    const foot = mk("div", "foot");
+    const hideToday = mk("button", "hide-today", "Hide until tomorrow");
+    hideToday.title = "Hide the reminder on this site until tomorrow";
+    foot.appendChild(hideToday);
+    expanded.appendChild(foot);
+
+    let open = intro;
+    pill.style.display = open ? "none" : "flex"; // match initial state
+    const setExpanded = (v) => {
+      open = v;
       pill.style.display = open ? "none" : "flex";
       expanded.style.display = open ? "block" : "none";
     };
+    const toggle = () => setExpanded(!open);
+
+    // Auto-collapse the intro back to the pill after 4s; any click inside the
+    // panel cancels that timer (the user is reading or interacting).
+    if (intro) {
+      const autoCollapse = setTimeout(() => {
+        if (!host.isConnected || !open) return;
+        setExpanded(false);
+        pill.classList.add("vv-pulse");
+      }, 4000);
+      expanded.addEventListener("click", () => clearTimeout(autoCollapse), { once: true });
+    }
+
     pill.addEventListener("click", toggle);
-    headLabel.addEventListener("click", toggle);
-    dismiss.addEventListener("click", () => {
+    head.addEventListener("click", toggle);
+    hideToday.addEventListener("click", () => {
       sessionStorage.setItem(dismissedKey, "1");
       host.remove();
     });
@@ -486,7 +556,10 @@
   function renderDiagnostics() {
     const { host, root } = makeShadowHost("vv-diagnostics-host");
 
-    const card = mk("div", "dpanel");
+    // Entrance animation only (shared .vv-enter keyframes, reduced-motion
+    // aware) — diagnostics never auto-collapses and is unaffected by the
+    // coupon panel's intro logic.
+    const card = mk("div", "dpanel vv-enter");
 
     const head = mk("div", "dhead");
     head.appendChild(mk("span", "", "VoucherVault diagnostics"));
