@@ -66,11 +66,11 @@ async def test_require_env_missing_url_and_token(monkeypatch, capsys):
     # the legacy session vars are gone from requirements and messaging
     assert "VOUCHERVAULT_USERNAME" not in err
     assert "VOUCHERVAULT_PASSWORD" not in err
-    assert "10.0.0.194" in err  # points at the internal container URL
+    assert "vouchervault.internal" in err  # points at the internal container URL
 
 
 async def test_require_env_ok(monkeypatch):
-    monkeypatch.setenv("VOUCHERVAULT_URL", "http://10.0.0.194:8000")
+    monkeypatch.setenv("VOUCHERVAULT_URL", "http://vouchervault.internal:8000")
     monkeypatch.setenv("VOUCHERVAULT_API_TOKEN", "token")
     monkeypatch.delenv("VOUCHERVAULT_USERNAME", raising=False)
     monkeypatch.delenv("VOUCHERVAULT_PASSWORD", raising=False)

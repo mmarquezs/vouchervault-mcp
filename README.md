@@ -22,7 +22,7 @@ Set these environment variables:
 
 | Variable | Description | Example |
 |----------|-------------|---------|
-| `VOUCHERVAULT_URL` | Base URL of the VoucherVault container (the **internal** URL) | `http://10.0.0.194:8000` |
+| `VOUCHERVAULT_URL` | Base URL of the VoucherVault container (the **internal** URL) | `http://vouchervault.internal:8000` |
 | `VOUCHERVAULT_API_TOKEN` | Bearer token for the token API (same token as the read stats endpoint; generate in the VoucherVault **Django admin**) | `abc123...` |
 
 That's all — no username/password, no session, no CSRF.
@@ -37,7 +37,7 @@ Add to your MCP client config (e.g. Claude Desktop, opencode, Cursor):
     "vouchervault": {
       "command": "vouchervault-mcp",
       "env": {
-        "VOUCHERVAULT_URL": "http://10.0.0.194:8000",
+        "VOUCHERVAULT_URL": "http://vouchervault.internal:8000",
         "VOUCHERVAULT_API_TOKEN": "your-api-token"
       }
     }
@@ -54,7 +54,7 @@ Or with `uvx`:
       "command": "uvx",
       "args": ["vouchervault-mcp"],
       "env": {
-        "VOUCHERVAULT_URL": "http://10.0.0.194:8000",
+        "VOUCHERVAULT_URL": "http://vouchervault.internal:8000",
         "VOUCHERVAULT_API_TOKEN": "your-api-token"
       }
     }
@@ -68,7 +68,7 @@ VoucherVault upstream exposes **no write REST API**. This deployment adds the
 `extapi` overlay patch (maintained in the ansible repo and applied on top of
 the pinned upstream image), which provides a token-authenticated JSON API.
 The server talks only to that API — the base URL is the **internal container
-URL** (e.g. `http://10.0.0.194:8000`), and every call carries
+URL** (e.g. `http://vouchervault.internal:8000`), and every call carries
 `Authorization: Bearer ${VOUCHERVAULT_API_TOKEN}` (the same token the legacy
 read-stats endpoint uses).
 
@@ -135,7 +135,7 @@ ruff check vouchervault_mcp tests
 Run the server:
 
 ```bash
-VOUCHERVAULT_URL=http://10.0.0.194:8000 \
+VOUCHERVAULT_URL=http://vouchervault.internal:8000 \
 VOUCHERVAULT_API_TOKEN=token \
 vouchervault-mcp
 ```

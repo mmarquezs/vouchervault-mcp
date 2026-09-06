@@ -20,7 +20,7 @@ from typing import Any
 import httpx
 import pytest
 
-BASE = "http://10.0.0.194:8000"
+BASE = "http://vouchervault.internal:8000"
 API_TOKEN = "dummy-api-token-for-tests"
 
 ITEM_COUPON = "11111111-1111-1111-1111-111111111111"

@@ -5,7 +5,7 @@ overlay which exposes a token-authenticated JSON API. This client speaks
 exactly that API — plain HTTP with a Bearer token, no session, no CSRF, no
 local Django user:
 
-  Base:  {VOUCHERVAULT_URL}         e.g. http://10.0.0.194:8000 (internal container URL)
+  Base:  {VOUCHERVAULT_URL}         e.g. http://vouchervault.internal:8000 (internal container URL)
   Auth:  Authorization: Bearer {VOUCHERVAULT_API_TOKEN}   (same token as the read stats API)
 
 Endpoints (all JSON; errors: 400 {"errors": {...}}, 401/403, 404):

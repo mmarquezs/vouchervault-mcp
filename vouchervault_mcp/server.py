@@ -209,7 +209,7 @@ def _require_env() -> None:
             + ", ".join(missing)
             + "\n"
             "Set VOUCHERVAULT_URL to the internal VoucherVault container URL "
-            "(e.g. http://10.0.0.194:8000) and VOUCHERVAULT_API_TOKEN to the "
+            "(e.g. http://vouchervault.internal:8000) and VOUCHERVAULT_API_TOKEN to the "
             "Bearer token accepted by the token API (the same token as the "
             "read stats endpoint, generated in the VoucherVault Django "
             "admin). No session/CSRF login is used and no local Django user "
