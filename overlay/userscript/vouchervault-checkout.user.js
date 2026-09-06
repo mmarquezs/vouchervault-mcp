@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         VoucherVault Checkout Reminder
 // @namespace    https://curiositystream.stream/
-// @version      1.4.0
+// @version      1.5.0
 // @description  Shows VoucherVault coupon codes matching the merchant you are currently visiting (checkout reminder)
 // @license      MIT
 // @match        https://*/*
@@ -13,10 +13,12 @@
 // @grant        GM_xmlhttpRequest
 // @grant        GM_getValue
 // @grant        GM_setValue
+// @grant        GM_deleteValue
 // @grant        GM_setClipboard
 // @grant        GM_registerMenuCommand
 // @grant        GM.getValue
 // @grant        GM.setValue
+// @grant        GM.deleteValue
 // @grant        GM.xmlHttpRequest
 // @grant        GM.setClipboard
 // @grant        GM.registerMenuCommand
@@ -48,12 +50,19 @@
 
   const FETCH_TIMEOUT_MS = 15000;
   const CACHE_TTL_MS = 6 * 60 * 60 * 1000; // 6h
+  const DRAG_THRESHOLD_PX = 6;    // pointer must move this far before it counts as a drag
+  const VIEWPORT_MARGIN_PX = 8;   // pill never closer than this to a viewport edge
+  const DEFAULT_POS = { right: 16, bottom: 16 };
+  const INTRO_AUTOCOLLAPSE_MS = 4000;
+  const POS_KEY = "vv-pos:";
+  const INTRO_KEY = "vv-intro:";
 
   // --------------------------------------------------- GM API compatibility
   // Greasemonkey 4 renamed the sync GM_* APIs to async GM.* ones. Support both.
   const GMAPI = {
     get: (k, d) => (typeof GM !== "undefined" && GM.getValue ? GM.getValue(k, d) : Promise.resolve(GM_getValue(k, d))),
     set: (k, v) => (typeof GM !== "undefined" && GM.setValue ? GM.setValue(k, v) : Promise.resolve(GM_setValue(k, v))),
+    del: (k) => (typeof GM !== "undefined" && GM.deleteValue ? GM.deleteValue(k) : (typeof GM_deleteValue === "function" ? Promise.resolve(GM_deleteValue(k)) : Promise.resolve())),
     xhr: (o) => (typeof GM !== "undefined" && GM.xmlHttpRequest ? GM.xmlHttpRequest(o) : GM_xmlhttpRequest(o)),
     clipboard: (t) => (typeof GM !== "undefined" && GM.setClipboard ? GM.setClipboard(t) : (typeof GM_setClipboard === "function" ? GM_setClipboard(t) : navigator.clipboard.writeText(t))),
     menu: (label, fn) => { if (typeof GM !== "undefined" && GM.registerMenuCommand) { GM.registerMenuCommand(label, fn); } else if (typeof GM_registerMenuCommand === "function") { GM_registerMenuCommand(label, fn); } }
@@ -266,6 +275,7 @@
       font-size: 13px;
       box-shadow: 0 2px 10px rgba(0,0,0,.2);
       user-select: none;
+      touch-action: none; /* the pill is a drag handle — keep taps/drags, no scroll hijack */
     }
     .head {
       display: flex;
@@ -275,6 +285,8 @@
       border-bottom: 1px solid var(--vv-border);
       font-weight: 600;
       cursor: pointer;
+      user-select: none;
+      touch-action: none; /* drag handle for the expanded panel */
     }
     .dismiss {
       cursor: pointer;
@@ -399,6 +411,11 @@
     @media (prefers-reduced-motion: reduce) {
       .vv-enter, .vv-pulse { animation: none; }
     }
+    /* Compact mobile sizing (v1.5): smaller pill, panel never wider than the
+       viewport. Desktop styling is untouched — the vv-mobile class is
+       recomputed on every render and on window resize. */
+    .vv-mobile .pill { font-size: 11.5px; padding: 5px 10px; }
+    .vv-mobile .panel { max-width: min(320px, calc(100vw - 24px)); }
   `;
 
   // Shared shadow host for every UI surface. Creates the host, injects the
@@ -453,6 +470,117 @@
     return ((Date.now() - cached.ts) / 3600000).toFixed(1) + " h";
   }
 
+  // ------------------------------------------------------- pill positioning
+
+  function parsePx(v, fallback) {
+    const n = parseFloat(v);
+    return Number.isFinite(n) ? n : fallback;
+  }
+
+  // Clamp right/bottom offsets so the host stays fully inside the viewport
+  // with at least VIEWPORT_MARGIN_PX on every edge.
+  function clampHostPosition(host, right, bottom) {
+    const w = host.offsetWidth || 0;
+    const h = host.offsetHeight || 0;
+    const maxRight = Math.max(VIEWPORT_MARGIN_PX, window.innerWidth - w - VIEWPORT_MARGIN_PX);
+    const maxBottom = Math.max(VIEWPORT_MARGIN_PX, window.innerHeight - h - VIEWPORT_MARGIN_PX);
+    return {
+      right: Math.min(Math.max(right, VIEWPORT_MARGIN_PX), maxRight),
+      bottom: Math.min(Math.max(bottom, VIEWPORT_MARGIN_PX), maxBottom),
+    };
+  }
+
+  // Apply (clamped) right/bottom offsets to the host; returns the clamped pair.
+  function setHostPosition(host, right, bottom) {
+    const p = clampHostPosition(host, right, bottom);
+    host.style.right = p.right + "px";
+    host.style.bottom = p.bottom + "px";
+    return p;
+  }
+
+  // Coarse pointer (phones/tablets) or a narrow viewport → compact sizing.
+  function isMobileViewport() {
+    const coarse = window.matchMedia && window.matchMedia("(pointer: coarse)").matches;
+    return Boolean(coarse) || window.innerWidth < 768;
+  }
+
+  // ----------------------------------------------------------- drag support
+
+  // Turns `handle` into a drag surface for the fixed-position `host` using
+  // Pointer Events (works for touch and mouse alike). A press that moves more
+  // than DRAG_THRESHOLD_PX drags the host (clamped to the viewport, final
+  // position persisted per site under POS_KEY + site) and does NOT activate;
+  // a press that stays within the threshold counts as a click and calls
+  // onActivate (the pill/header toggle). Suppressing activation this way —
+  // instead of intercepting the synthetic click — keeps drag vs. tap
+  // deterministic on both input types.
+  function makeDraggable(handle, host, onActivate) {
+    let active = false;
+    let moved = false;
+    let pointerId = null;
+    let startX = 0;
+    let startY = 0;
+    let startRight = DEFAULT_POS.right;
+    let startBottom = DEFAULT_POS.bottom;
+
+    const persistPosition = () => {
+      const p = setHostPosition(
+        host,
+        parsePx(host.style.right, DEFAULT_POS.right),
+        parsePx(host.style.bottom, DEFAULT_POS.bottom)
+      );
+      GMAPI.set(POS_KEY + site, { right: Math.round(p.right), bottom: Math.round(p.bottom) });
+    };
+
+    handle.addEventListener("pointerdown", (e) => {
+      if (e.pointerType === "mouse" && e.button !== 0) return;
+      active = true;
+      moved = false;
+      pointerId = e.pointerId;
+      startX = e.clientX;
+      startY = e.clientY;
+      startRight = parsePx(host.style.right, DEFAULT_POS.right);
+      startBottom = parsePx(host.style.bottom, DEFAULT_POS.bottom);
+      try { handle.setPointerCapture(e.pointerId); } catch (_) { /* capture is best-effort */ }
+    });
+
+    handle.addEventListener("pointermove", (e) => {
+      if (!active || e.pointerId !== pointerId) return;
+      const dx = e.clientX - startX;
+      const dy = e.clientY - startY;
+      if (!moved && Math.hypot(dx, dy) > DRAG_THRESHOLD_PX) {
+        moved = true;
+        handle.style.cursor = "grabbing";
+      }
+      if (moved) setHostPosition(host, startRight - dx, startBottom - dy);
+    });
+
+    const release = (e) => {
+      try { handle.releasePointerCapture(e.pointerId); } catch (_) { /* already released */ }
+    };
+
+    handle.addEventListener("pointerup", (e) => {
+      if (!active || e.pointerId !== pointerId) return;
+      active = false;
+      handle.style.cursor = "";
+      release(e);
+      if (moved) {
+        persistPosition();
+      } else if (onActivate) {
+        onActivate();
+      }
+    });
+
+    handle.addEventListener("pointercancel", (e) => {
+      if (!active || e.pointerId !== pointerId) return;
+      active = false;
+      handle.style.cursor = "";
+      release(e);
+      // A cancelled gesture keeps a partial drag's position but never toggles.
+      if (moved) persistPosition();
+    });
+  }
+
   // ------------------------------------------------------- SPA URL watching
 
   // Controller for the live coupon panel, replaced on every render().
@@ -468,6 +596,9 @@
       clearInterval(urlWatchTimer);
       urlWatchTimer = null;
     }
+    if (urlWatchState && urlWatchState.onResize) {
+      window.removeEventListener("resize", urlWatchState.onResize);
+    }
     urlWatchState = null;
   }
 
@@ -475,10 +606,26 @@
   // host is in the DOM, poll location.href and expand a collapsed panel when
   // the user moves from a non-checkout to a checkout URL on the same
   // hostname. Leaving checkout never force-collapses (user keeps control).
-  function startUrlWatch(host) {
+  // The same watcher owns the window resize listener that re-clamps the live
+  // pill position and refreshes compact mobile mode; both clean up when the
+  // host leaves the DOM (hide-until-tomorrow, re-render, manual removal).
+  function startUrlWatch(host, root) {
     stopUrlWatch();
+    const onResize = () => {
+      if (!host.isConnected) { stopUrlWatch(); return; }
+      // Re-clamp the live position in place (no re-render needed) and
+      // re-evaluate compact mobile sizing.
+      setHostPosition(
+        host,
+        parsePx(host.style.right, DEFAULT_POS.right),
+        parsePx(host.style.bottom, DEFAULT_POS.bottom)
+      );
+      root.classList.toggle("vv-mobile", isMobileViewport());
+    };
+    window.addEventListener("resize", onResize);
     urlWatchState = {
       host,
+      onResize,
       lastHref: location.href,
       lastHostname: location.hostname,
       lastCheckout: isCheckoutUrl(),
@@ -486,7 +633,8 @@
     urlWatchTimer = setInterval(() => {
       const st = urlWatchState;
       if (!st) { stopUrlWatch(); return; }
-      // Host removed (hide-until-tomorrow, re-render) → stop polling.
+      // Host removed (hide-until-tomorrow, re-render) → stop polling and
+      // drop the resize listener with it.
       if (!st.host.isConnected) { stopUrlWatch(); return; }
       const href = location.href;
       if (href === st.lastHref) return;
@@ -506,19 +654,39 @@
     }, 800);
   }
 
-  function render(coupons) {
+  async function render(coupons) {
     if (!coupons.length) return;
     const dismissedKey = "vv-dismissed:" + site + ":" + todayISO();
     if (sessionStorage.getItem(dismissedKey)) return;
 
+    // Saved pill position for this site (persisted by dragging); falls back
+    // to the default 16/16 corner offsets. Read before the host is built so
+    // it can be applied the moment the host hits the DOM.
+    const savedPos = await GMAPI.get(POS_KEY + site, null);
+    const savedRight = savedPos && Number.isFinite(savedPos.right) ? savedPos.right : DEFAULT_POS.right;
+    const savedBottom = savedPos && Number.isFinite(savedPos.bottom) ? savedPos.bottom : DEFAULT_POS.bottom;
+
     const { host, root } = makeShadowHost("vv-checkout-reminder-host");
 
-    // Attention model (v1.4): no daily intro. On checkout pages the panel
-    // always opens expanded with the entrance animation — checkout visits
-    // are rare and that is the moment this tool exists for. Anywhere else it
-    // stays a collapsed pill that pulses once per browser session so the eye
-    // learns it exists.
-    const startExpanded = isCheckoutUrl();
+    // Attention model (v1.5): on checkout pages the panel always opens
+    // expanded with the entrance animation — checkout visits are rare and
+    // that is the moment this tool exists for. Anywhere else the FIRST
+    // render of the browser session gets the expanded intro (auto-collapses
+    // after 4s, any click cancels — gated per site via vv-intro:<site>);
+    // later renders stay a collapsed pill that pulses once per session so
+    // the eye learns it exists. Day-dismiss suppresses everything.
+    const introKey = INTRO_KEY + site;
+    const onCheckout = isCheckoutUrl();
+    const introPending = !onCheckout && !sessionStorage.getItem(introKey);
+    const startExpanded = onCheckout || introPending;
+    if (introPending) sessionStorage.setItem(introKey, "1");
+    let introTimer = null;
+    const cancelIntroTimer = () => {
+      if (introTimer !== null) {
+        clearTimeout(introTimer);
+        introTimer = null;
+      }
+    };
 
     const pill = document.createElement("div");
     pill.className = "pill pill-cta";
@@ -604,7 +772,11 @@
       pill.style.display = open ? "none" : "flex";
       expanded.style.display = open ? "block" : "none";
     };
-    const toggle = () => setExpanded(!open);
+    // A click cancels the pending 4s intro auto-collapse, then toggles.
+    const toggle = () => {
+      cancelIntroTimer();
+      setExpanded(!open);
+    };
 
     // Expand with a replayed entrance animation (used by the SPA watcher and
     // any future collapse → expand cycle).
@@ -616,19 +788,38 @@
       expanded.classList.add("vv-enter");
     };
 
-    pill.addEventListener("click", toggle);
-    head.addEventListener("click", toggle);
+    // Pill and panel header are drag handles; a press that doesn't move
+    // beyond the drag threshold toggles, a real drag repositions + persists
+    // and never toggles (see makeDraggable).
+    makeDraggable(pill, host, toggle);
+    makeDraggable(head, host, toggle);
+
     hideToday.addEventListener("click", () => {
+      cancelIntroTimer();
       sessionStorage.setItem(dismissedKey, "1");
-      host.remove(); // the watcher's isConnected check clears the interval
+      host.remove(); // the watcher's isConnected check clears the interval + resize listener
     });
+
+    // First non-checkout render of the session: auto-collapse the intro
+    // after 4s unless the user already interacted.
+    if (introPending) {
+      introTimer = setTimeout(() => {
+        introTimer = null;
+        if (open) setExpanded(false);
+      }, INTRO_AUTOCOLLAPSE_MS);
+    }
 
     root.appendChild(pill);
     root.appendChild(expanded);
     document.documentElement.appendChild(host);
+    // OffsetWidth is only measurable once attached — apply (and clamp) the
+    // saved position immediately after the host enters the DOM.
+    setHostPosition(host, savedRight, savedBottom);
+    root.classList.toggle("vv-mobile", isMobileViewport());
 
     // One subtle pulse per browser session, collapsed non-checkout pill
-    // only — on checkout pages the expanded panel is attention enough.
+    // only — on checkout pages and during the intro the expanded panel is
+    // attention enough.
     if (!startExpanded) {
       const noticedKey = "vv-noticed:" + site;
       if (!sessionStorage.getItem(noticedKey)) {
@@ -638,7 +829,7 @@
     }
 
     panelCtl = { host, isOpen: () => open, expand: expandWithAnimation };
-    startUrlWatch(host);
+    startUrlWatch(host, root);
   }
 
   // ------------------------------------------------------------ diagnostics
@@ -702,6 +893,22 @@
     cacheSec.appendChild(ageRow.row);
     cacheSec.appendChild(refreshedRow.row);
     card.appendChild(cacheSec);
+
+    // Layout section: pill position recovery (per-site drag position).
+    const posSec = mk("div", "dsec");
+    posSec.appendChild(mk("div", "dsec-title", "Layout"));
+    const resetPos = mk("button", "hide-today", "Reset pill position");
+    resetPos.title = "Clear the saved pill position for " + registrable + " and re-render";
+    resetPos.addEventListener("click", async () => {
+      await GMAPI.del(POS_KEY + site);
+      // If the coupon pill is currently visible, snap it back to the corner.
+      if (panelCtl && panelCtl.host.isConnected) {
+        setHostPosition(panelCtl.host, DEFAULT_POS.right, DEFAULT_POS.bottom);
+      }
+      renderDiagnostics();
+    });
+    posSec.appendChild(resetPos);
+    card.appendChild(posSec);
 
     // Verdict
     const verdict = mk("div", "verdict");
