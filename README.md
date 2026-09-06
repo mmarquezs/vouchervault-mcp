@@ -10,10 +10,10 @@ Built with [FastMCP](https://github.com/jlowin/fastmcp), runs as a stdio subproc
 pip install vouchervault-mcp
 ```
 
-Or install directly from GitHub (pin to a tag):
+Or install directly from GitHub (pin to a tag or commit):
 
 ```bash
-pip install vouchervault-mcp@git+https://github.com/mmarquezs/vouchervault-mcp@v0.1.0
+pip install vouchervault-mcp@git+https://github.com/mmarquezs/vouchervault-mcp@<ref>
 ```
 
 ## Configuration
@@ -22,15 +22,10 @@ Set these environment variables:
 
 | Variable | Description | Example |
 |----------|-------------|---------|
-| `VOUCHERVAULT_URL` | Base URL of your VoucherVault instance | `https://vouchervault.example.com` |
-| `VOUCHERVAULT_USERNAME` | **LOCAL** Django account username | `admin` |
-| `VOUCHERVAULT_PASSWORD` | Local account password | `your-password` |
-| `VOUCHERVAULT_API_TOKEN` | Bearer token for the read API (generate in the VoucherVault **Django admin**) | `abc123...` |
-| `VOUCHERVAULT_LANG_PREFIX` | i18n URL prefix (default `/en`; auto-falls back to none if `/en/` 404s) | `/en` |
+| `VOUCHERVAULT_URL` | Base URL of the VoucherVault container (the **internal** URL) | `http://10.0.0.194:8000` |
+| `VOUCHERVAULT_API_TOKEN` | Bearer token for the token API (same token as the read stats endpoint; generate in the VoucherVault **Django admin**) | `abc123...` |
 
-> **Important:** only **LOCAL Django accounts** can password-login. If your
-> instance authenticates via OIDC, create a dedicated local superuser for this
-> server (OIDC users cannot log in through the Django login form).
+That's all — no username/password, no session, no CSRF.
 
 ## MCP Client Configuration
 
@@ -42,11 +37,8 @@ Add to your MCP client config (e.g. Claude Desktop, opencode, Cursor):
     "vouchervault": {
       "command": "vouchervault-mcp",
       "env": {
-        "VOUCHERVAULT_URL": "https://vouchervault.example.com",
-        "VOUCHERVAULT_USERNAME": "admin",
-        "VOUCHERVAULT_PASSWORD": "your-password",
-        "VOUCHERVAULT_API_TOKEN": "your-api-token",
-        "VOUCHERVAULT_LANG_PREFIX": "/en"
+        "VOUCHERVAULT_URL": "http://10.0.0.194:8000",
+        "VOUCHERVAULT_API_TOKEN": "your-api-token"
       }
     }
   }
@@ -62,9 +54,7 @@ Or with `uvx`:
       "command": "uvx",
       "args": ["vouchervault-mcp"],
       "env": {
-        "VOUCHERVAULT_URL": "https://vouchervault.example.com",
-        "VOUCHERVAULT_USERNAME": "admin",
-        "VOUCHERVAULT_PASSWORD": "your-password",
+        "VOUCHERVAULT_URL": "http://10.0.0.194:8000",
         "VOUCHERVAULT_API_TOKEN": "your-api-token"
       }
     }
@@ -72,42 +62,50 @@ Or with `uvx`:
 }
 ```
 
-## How writes work
+## How it works — token API (extapi overlay)
 
-VoucherVault upstream exposes **no write REST API**. The only API endpoint is
-`GET /api/get/stats[?user=<name>]` (Bearer token) — which this server uses for
-all reads.
+VoucherVault upstream exposes **no write REST API**. This deployment adds the
+`extapi` overlay patch (maintained in the ansible repo and applied on top of
+the pinned upstream image), which provides a token-authenticated JSON API.
+The server talks only to that API — the base URL is the **internal container
+URL** (e.g. `http://10.0.0.194:8000`), and every call carries
+`Authorization: Bearer ${VOUCHERVAULT_API_TOKEN}` (the same token the legacy
+read-stats endpoint uses).
 
-Everything else is performed exactly like the web UI does it:
+- No session login, no CSRF tokens, no local Django user needed.
+- Reads and writes all go through `/api/v1/*`; responses are JSON and errors
+  carry the server's payload (`400 {"errors": {...}}`, `401`/`403` for a bad
+  or missing token, `404` for unknown items). The client tolerates both
+  trailing-slash variants of every route.
+- `days_left` is computed server-side; the client never re-derives it.
 
-1. Session login via the Django login form at `{lang_prefix}/accounts/login/`
-   (CSRF token parsed from the form, session cookie kept, `Origin`/`Referer`
-   headers set to the base URL as Django requires over https).
-2. Each write (`items/create/`, `items/edit/<uuid>`, `items/delete/<uuid>`,
-   `items/toggle_status/<uuid>`) is a form POST with the CSRF token
-   (`csrfmiddlewaretoken` field + `X-CSRFToken` header) and the full set of
-   `ItemForm` fields (`name`, `issuer`, `redeem_code`, `pin`, `issue_date`,
-   `expiry_date`, `description`, `logo_slug`, `type`, `value`, `value_type`,
-   `currency`, `code_type`, `tile_color`) — mirrors of upstream
-   `myapp/forms.py`. Edits first GET the form and merge changed fields into
-   the current values so required fields are never lost.
-3. If a write gets bounced to the login page (session expiry), the client
-   re-logs-in once and retries automatically.
+Endpoints used:
 
-Field names and routes were verified against VoucherVault
-[`myapp/forms.py`](https://github.com/l4rm4nd/VoucherVault/blob/main/myapp/forms.py)
-and `myapp/urls.py`. Because the integration drives HTML forms, **pin your
-VoucherVault image to the tested 1.30.x series** — a major UI/form refactor
-upstream can break writes.
+| Method | Route | Purpose |
+|--------|-------|---------|
+| `GET` | `/api/v1/items?search=&type=&include_used=&include_expired=&username=` | list (ordered by `expiry_date`) |
+| `POST` | `/api/v1/items/` | create |
+| `GET` | `/api/v1/items/{id}` | detail |
+| `PATCH` | `/api/v1/items/{id}` | partial update |
+| `POST` | `/api/v1/items/{id}/toggle-status/` | toggle used/available |
+| `DELETE` | `/api/v1/items/{id}` | delete |
+
+### Pinning + overlay drift
+
+The VoucherVault image is **pinned to the tested 1.30.x series**, and the
+`extapi` overlay patch is rebuilt on top of it. The overlay build **fails
+loudly** if the upstream files it touches drift from what the patch expects —
+so a major upstream refactor cannot silently break this integration; it
+breaks the image build instead and gets dealt with before deploy.
 
 ## Tools
 
 | Tool | Description |
 |------|-------------|
-| `coupons_list` | List/search items with substring search, type filter, `include_used`/`include_expired` flags and `days_left` annotation |
+| `coupons_list` | List/search items with substring search, type filter, `include_used`/`include_expired` flags and server-side `days_left` annotation |
 | `coupon_get` | Get full details of a single item by id (UUID) |
-| `coupon_create` | Create a coupon/voucher/gift card/loyalty card |
-| `coupon_update` | Update item fields by id (only provided fields change) |
+| `coupon_create` | Create a coupon/voucher/gift card/loyalty card (returns the created item) |
+| `coupon_update` | Update item fields by id (only provided fields change; returns the updated item) |
 | `coupon_mark_used` | Toggle used status — calling again marks the item available |
 | `coupon_delete` | Permanently delete an item |
 
@@ -131,14 +129,13 @@ source .venv/bin/activate
 pip install -e ".[dev]"
 pytest
 bandit -r vouchervault_mcp -ll -ii
+ruff check vouchervault_mcp tests
 ```
 
 Run the server:
 
 ```bash
-VOUCHERVAULT_URL=https://vouchervault.example.com \
-VOUCHERVAULT_USERNAME=admin \
-VOUCHERVAULT_PASSWORD=pass \
+VOUCHERVAULT_URL=http://10.0.0.194:8000 \
 VOUCHERVAULT_API_TOKEN=token \
 vouchervault-mcp
 ```

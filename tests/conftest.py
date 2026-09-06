@@ -1,279 +1,132 @@
-"""Shared fixtures: a fake VoucherVault behind httpx.MockTransport.
+"""Shared fixtures: a fake VoucherVault extapi (token API) behind httpx.MockTransport.
 
-Simulates the relevant upstream surface (VoucherVault main branch):
-  - i18n-prefixed routes ({prefix}/...) incl. 404 fallback when no prefix
-  - Django login form at {prefix}/accounts/login/ (csrfmiddlewaretoken)
-  - session cookie gating on all pages
-  - Bearer-token stats API at {prefix}/api/get/stats
-  - create/edit forms (csrf + all ItemForm fields) with errorlist on failure
-  - @require_POST delete + toggle endpoints
+Simulates the extapi overlay surface applied by the ansible deployment on top
+of upstream 1.30.x:
+  - Bearer-token auth on every /api/v1/* route (401 when missing/wrong)
+  - GET    /api/v1/items  (search/type/include_used/include_expired/username)
+  - POST   /api/v1/items  (create; 400 {"errors": {...}} on validation failure)
+  - GET/PATCH/DELETE /api/v1/items/{id}
+  - POST   /api/v1/items/{id}/toggle-status/
+  - both trailing-slash variants exist; per-test slash_mode forces one
+    variant to 404 so client retry behavior can be exercised
 """
 
 from __future__ import annotations
 
-import urllib.parse
+import json
 from datetime import date, timedelta
+from typing import Any
 
 import httpx
 import pytest
 
-BASE = "https://vouchervault.test"
-CSRF = "test-csrf-token-value"
-SESSION_ID = "test-session-id"
+BASE = "http://10.0.0.194:8000"
+API_TOKEN = "dummy-api-token-for-tests"
 
 ITEM_COUPON = "11111111-1111-1111-1111-111111111111"
 ITEM_USED = "22222222-2222-2222-2222-222222222222"
 ITEM_EXPIRED = "33333333-3333-3333-3333-333333333333"
 ITEM_LOYALTY = "44444444-4444-4444-4444-444444444444"
 
-USERNAME = "admin"
-PASSWORD = "dummy-password-for-tests"
-API_TOKEN = "dummy-api-token-for-tests"
-
-# Exact ItemForm.Meta.fields from upstream myapp/forms.py
-# (https://github.com/l4rm4nd/VoucherVault, fetched 2026-09):
-#   fields = ['name', 'issuer', 'redeem_code', 'pin', 'issue_date',
-#             'expiry_date', 'description', 'logo_slug', 'type', 'value',
-#             'value_type', 'currency', 'file', 'code_type', 'tile_color']
-REAL_ITEM_FORM_FIELDS = [
-    "name",
-    "issuer",
-    "redeem_code",
-    "pin",
-    "issue_date",
-    "expiry_date",
-    "description",
-    "logo_slug",
-    "type",
-    "value",
-    "value_type",
-    "currency",
-    "file",
-    "code_type",
-    "tile_color",
-]
-
-SELECT_FIELDS = {
-    "type": ["voucher", "giftcard", "coupon", "loyaltycard"],
-    "code_type": ["qrcode", "code39", "ean13"],
-    "value_type": ["money", "percentage", "multiplier"],
-    "currency": ["EUR", "USD"],
-}
+ITEM_TYPES = ("voucher", "giftcard", "coupon", "loyaltycard")
+VALUE_TYPES = ("money", "percentage", "multiplier")
 
 
-def default_items() -> dict[str, dict[str, str]]:
-    """Current form-field values for existing items (mirrors stats_payload)."""
+def default_items() -> dict[str, dict[str, Any]]:
+    """Existing items in serialized form (days_left added at response time)."""
     return {
         ITEM_COUPON: {
-            "name": "Amazon 10EUR",
-            "issuer": "amazon.es",
-            "redeem_code": "AMZN-2026-XYZ",
-            "pin": "",
-            "issue_date": "2026-01-01",
-            "expiry_date": (date.today() + timedelta(days=30)).isoformat(),
-            "description": "birthday coupon",
-            "logo_slug": "",
+            "id": ITEM_COUPON,
             "type": "coupon",
+            "name": "Amazon 10EUR",
+            "redeem_code": "AMZN-2026-XYZ",
+            "code_type": "qrcode",
+            "issuer": "amazon.es",
             "value": "25.00",
             "value_type": "money",
             "currency": "EUR",
-            "code_type": "qrcode",
-            "tile_color": "",
+            "issue_date": "2026-01-01",
+            "expiry_date": (date.today() + timedelta(days=30)).isoformat(),
+            "description": "birthday coupon",
+            "is_used": False,
         },
         ITEM_USED: {
-            "name": "El Corte Ingles Gift",
-            "issuer": "elcorteingles.es",
-            "redeem_code": "ECI-GIFT-77",
-            "pin": "1234",
-            "issue_date": "2026-01-15",
-            "expiry_date": (date.today() + timedelta(days=200)).isoformat(),
-            "description": "",
-            "logo_slug": "",
+            "id": ITEM_USED,
             "type": "giftcard",
+            "name": "El Corte Ingles Gift",
+            "redeem_code": "ECI-GIFT-77",
+            "code_type": "qrcode",
+            "issuer": "elcorteingles.es",
             "value": "50.00",
             "value_type": "money",
             "currency": "EUR",
-            "code_type": "qrcode",
-            "tile_color": "",
+            "issue_date": "2026-01-15",
+            "expiry_date": (date.today() + timedelta(days=200)).isoformat(),
+            "description": "",
+            "is_used": True,
         },
         ITEM_EXPIRED: {
-            "name": "Old Voucher",
-            "issuer": "zalando.es",
-            "redeem_code": "OLD-VOUCHER-1",
-            "pin": "",
-            "issue_date": "2019-01-01",
-            "expiry_date": "2020-01-01",
-            "description": "",
-            "logo_slug": "",
+            "id": ITEM_EXPIRED,
             "type": "voucher",
+            "name": "Old Voucher",
+            "redeem_code": "OLD-VOUCHER-1",
+            "code_type": "qrcode",
+            "issuer": "zalando.es",
             "value": "5.00",
             "value_type": "money",
             "currency": "EUR",
-            "code_type": "qrcode",
-            "tile_color": "",
+            "issue_date": "2019-01-01",
+            "expiry_date": "2020-01-01",
+            "description": "",
+            "is_used": False,
         },
         ITEM_LOYALTY: {
-            "name": "Loyalty Card",
-            "issuer": "mercadona.es",
-            "redeem_code": "9990123456789",
-            "pin": "",
-            "issue_date": "2026-02-02",
-            "expiry_date": (date.today() + timedelta(days=365)).isoformat(),
-            "description": "",
-            "logo_slug": "",
+            "id": ITEM_LOYALTY,
             "type": "loyaltycard",
+            "name": "Loyalty Card",
+            "redeem_code": "9990123456789",
+            "code_type": "qrcode",
+            "issuer": "mercadona.es",
             "value": "0.00",
             "value_type": "money",
             "currency": "EUR",
-            "code_type": "qrcode",
-            "tile_color": "",
+            "issue_date": "2026-02-02",
+            "expiry_date": (date.today() + timedelta(days=365)).isoformat(),
+            "description": "",
+            "is_used": False,
         },
     }
 
 
-def stats_payload() -> dict:
-    return {
-        "item_stats": {"total_items": 4},
-        "issuer_stats": [],
-        "user_stats": {"total_users": 1},
-        "item_details": [
-            {
-                "id": ITEM_COUPON,
-                "type": "coupon",
-                "name": "Amazon 10EUR",
-                "redeem_code": "AMZN-2026-XYZ",
-                "code_type": "qrcode",
-                "pin": None,
-                "issuer": "amazon.es",
-                "value": "25.00",
-                "value_type": "money",
-                "currency": "EUR",
-                "issue_date": "2026-01-01",
-                "expiry_date": (date.today() + timedelta(days=30)).isoformat(),
-                "description": "birthday coupon",
-                "is_used": False,
-                "is_pinned": False,
-                "user__username": USERNAME,
-            },
-            {
-                "id": ITEM_USED,
-                "type": "giftcard",
-                "name": "El Corte Ingles Gift",
-                "redeem_code": "ECI-GIFT-77",
-                "code_type": "qrcode",
-                "pin": "1234",
-                "issuer": "elcorteingles.es",
-                "value": "50.00",
-                "value_type": "money",
-                "currency": "EUR",
-                "issue_date": "2026-01-15",
-                "expiry_date": (date.today() + timedelta(days=200)).isoformat(),
-                "description": None,
-                "is_used": True,
-                "is_pinned": False,
-                "user__username": USERNAME,
-            },
-            {
-                "id": ITEM_EXPIRED,
-                "type": "voucher",
-                "name": "Old Voucher",
-                "redeem_code": "OLD-VOUCHER-1",
-                "code_type": "qrcode",
-                "pin": None,
-                "issuer": "zalando.es",
-                "value": "5.00",
-                "value_type": "money",
-                "currency": "EUR",
-                "issue_date": "2019-01-01",
-                "expiry_date": "2020-01-01",
-                "description": None,
-                "is_used": False,
-                "is_pinned": False,
-                "user__username": USERNAME,
-            },
-            {
-                "id": ITEM_LOYALTY,
-                "type": "loyaltycard",
-                "name": "Loyalty Card",
-                "redeem_code": "9990123456789",
-                "code_type": "qrcode",
-                "pin": None,
-                "issuer": "mercadona.es",
-                "value": "0.00",
-                "value_type": "money",
-                "currency": "EUR",
-                "issue_date": "2026-02-02",
-                "expiry_date": (date.today() + timedelta(days=365)).isoformat(),
-                "description": None,
-                "is_used": False,
-                "is_pinned": False,
-                "user__username": USERNAME,
-            },
-        ],
-    }
+def serialize(raw: dict[str, Any]) -> dict[str, Any]:
+    """days_left is computed server-side (extapi overlay behavior)."""
+    item = dict(raw)
+    expiry = item.get("expiry_date")
+    item["days_left"] = None
+    if expiry:
+        try:
+            item["days_left"] = (
+                date.fromisoformat(str(expiry)[:10]) - date.today()
+            ).days
+        except ValueError:
+            item["days_left"] = None
+    return item
 
 
-def render_login_page(token: str, with_error: bool = False) -> str:
-    error = '<ul class="errorlist"><li>Wrong username or password.</li></ul>' if with_error else ""
-    return f"""<html><body>{error}
-<form method="post" action="/en/accounts/login/">
-  <input type="hidden" name="csrfmiddlewaretoken" value="{token}" />
-  <input type="hidden" name="next" value="/" />
-  <input type="text" name="username" />
-  <input type="password" name="password" />
-  <button type="submit">Login</button>
-</form>
-</body></html>"""
-
-
-def render_item_form(path: str, token: str, values: dict[str, str], errors: list[str] | None = None) -> str:
-    parts = [
-        (
-            '<html><body><nav><form method="post" action="/en/logout/">'
-            f'<input type="hidden" name="csrfmiddlewaretoken" value="{token}" />'
-            "</form></nav>"
-        )
-    ]
-    if errors:
-        parts.append('<ul class="errorlist">')
-        for err in errors:
-            parts.append(f"<li>{err}</li>")
-        parts.append("</ul>")
-    parts.append(f'<form method="post" action="{path}" enctype="multipart/form-data">')
-    parts.append(f'<input type="hidden" name="csrfmiddlewaretoken" value="{token}" />')
-    for name in REAL_ITEM_FORM_FIELDS:
-        if name == "file":
-            parts.append(f'<input type="file" name="{name}" />')
-            continue
-        value = values.get(name, "")
-        if name in SELECT_FIELDS:
-            options = []
-            for opt in SELECT_FIELDS[name]:
-                selected = " selected" if opt == value else ""
-                options.append(f'<option value="{opt}"{selected}>{opt}</option>')
-            parts.append(f'<select name="{name}">{"".join(options)}</select>')
-        elif name == "description":
-            parts.append(f'<textarea name="{name}">{value}</textarea>')
-        elif name == "value_type":
-            # upstream renders it as a hidden input
-            parts.append(f'<input type="hidden" name="{name}" value="{value}" />')
-        else:
-            input_type = "date" if name in ("issue_date", "expiry_date") else "text"
-            parts.append(f'<input type="{input_type}" name="{name}" value="{value}" />')
-    parts.append('<button type="submit">Save</button>')
-    parts.append("</form></body></html>")
-    return "".join(parts)
 class FakeVault:
     def __init__(self) -> None:
         self.requests: list[dict] = []
         self.items = default_items()
-        self.created: list[dict] = []
-        self.deleted: list[str] = []
-        self.login_failures = 0
-        self.force_login_redirect_get = 0
-        self.force_login_redirect_post = 0
-        self.prefix_mode = "en"  # "en" or "none" (no i18n prefix)
+        self.created_ids: list[str] = []
+        self.deleted_ids: list[str] = []
         self.api_token = API_TOKEN
+        # "both"  -> slashed and non-slashed routes both exist
+        # "noslash" -> only non-slashed routes exist (slashed ones 404)
+        # "slash" -> only slashed routes exist (non-slashed ones 404)
+        self.slash_mode = "both"
+        # next /api/v1 request gets a 500 whose body echoes the Authorization
+        # header (used to assert token scrubbing in surfaced errors)
+        self.leak_auth_on_next = False
 
     # ------------------------- helpers ------------------------- #
 
@@ -284,158 +137,194 @@ class FakeVault:
             if r["method"] == method and r["path"].endswith(path_suffix)
         ]
 
-    @staticmethod
-    def _has_session(request: httpx.Request) -> bool:
-        cookie = request.headers.get("cookie", "")
-        return f"sessionid={SESSION_ID}" in cookie
-
-    @staticmethod
-    def _csrf_ok(data: dict, request: httpx.Request) -> bool:
-        token = data.get("csrfmiddlewaretoken") or request.headers.get("x-csrftoken", "")
-        return token == CSRF
-
-    def _prefix(self, request: httpx.Request) -> str:
-        return "/en" if request.url.path.startswith("/en") else ""
+    def _path_allowed(self, path: str) -> bool:
+        slashed = path.endswith("/")
+        if self.slash_mode == "noslash":
+            return not slashed
+        if self.slash_mode == "slash":
+            return slashed
+        return True
 
     # ------------------------- handler ------------------------- #
 
     def handler(self, request: httpx.Request) -> httpx.Response:
         method = request.method
         path = request.url.path
-        data: dict[str, str] = {}
-        if method == "POST":
-            data = dict(
-                urllib.parse.parse_qsl(request.content.decode("utf-8"), keep_blank_values=True)
-            )
+        body: Any = None
+        if request.content:
+            try:
+                body = json.loads(request.content.decode("utf-8"))
+            except ValueError:
+                body = None
         self.requests.append(
             {
                 "method": method,
                 "path": path,
                 "params": dict(request.url.params),
                 "headers": dict(request.headers),
-                "data": data,
+                "json": body,
             }
         )
 
-        # prefix disabled on this instance -> /en/* 404s
-        if self.prefix_mode == "none" and path.startswith("/en"):
-            return httpx.Response(404, text="not found")
-
-        # simulate server-side session invalidation (redirect to login)
-        if method == "GET" and self.force_login_redirect_get > 0 and path != f"{self._prefix(request)}/accounts/login/":
-            self.force_login_redirect_get -= 1
-            return httpx.Response(302, headers={"location": f"{self._prefix(request)}/accounts/login/?next={path}"})
-        if method == "POST" and self.force_login_redirect_post > 0:
-            self.force_login_redirect_post -= 1
-            return httpx.Response(302, headers={"location": f"{self._prefix(request)}/accounts/login/?next={path}"})
-
-        # ---------- login ---------- #
-        if path.endswith("/accounts/login/") and method == "GET":
-            return httpx.Response(
-                200,
-                html=render_login_page(CSRF),
-                headers=[("set-cookie", f"csrftoken={CSRF}; Path=/")],
-            )
-        if path.endswith("/accounts/login/") and method == "POST":
-            if not self._csrf_ok(data, request) or request.headers.get("origin") != BASE:
-                return httpx.Response(403, text="CSRF verification failed")
-            if data.get("username") != USERNAME or data.get("password") != PASSWORD:
-                self.login_failures += 1
-                return httpx.Response(200, html=render_login_page(CSRF, with_error=True))
-            return httpx.Response(
-                303,
-                headers=[
-                    ("location", data.get("next") or "/en/"),
-                    ("set-cookie", f"sessionid={SESSION_ID}; Path=/"),
-                ],
-            )
-
-        # ---------- read API (no session required upstream — token only) ---------- #
-        if path.endswith("/api/get/stats") and method == "GET":
+        if self.leak_auth_on_next:
+            self.leak_auth_on_next = False
             auth = request.headers.get("authorization", "")
-            if auth != f"Bearer {self.api_token}":
-                return httpx.Response(403, text="Unauthorized. Invalid or missing authorization token.")
-            return httpx.Response(200, json=stats_payload())
-
-        # ---------- auth gate for everything below ---------- #
-        if not self._has_session(request):
-            return httpx.Response(302, headers={"location": f"{self._prefix(request)}/accounts/login/?next={path}"})
-
-        prefix = self._prefix(request)
-
-        # ---------- dashboard (auth verification target) ---------- #
-        if path == f"{prefix}/" and method == "GET":
-            return httpx.Response(200, html=f"<html><body>items list {CSRF}</body></html>")
-
-        # ---------- create ---------- #
-        if path == f"{prefix}/items/create/" and method == "GET":
             return httpx.Response(
-                200, html=render_item_form(path, CSRF, {"type": "", "value_type": "money", "currency": "EUR", "code_type": ""})
+                500,
+                text=f"internal error handling {method} {path} with {auth}",
             )
-        if path == f"{prefix}/items/create/" and method == "POST":
-            if not self._csrf_ok(data, request):
-                return httpx.Response(403, text="CSRF verification failed")
-            errors = []
-            for required in ("name", "issuer", "redeem_code", "issue_date", "code_type"):
-                if not data.get(required):
-                    errors.append(f"This field is required: {required}.")
-            if errors:
-                return httpx.Response(200, html=render_item_form(path, CSRF, dict(data), errors))
-            new_uuid = "aaaaaaaa-1111-1111-1111-111111111111"
-            self.created.append(dict(data))
-            self.items[new_uuid] = {k: v for k, v in data.items() if k != "csrfmiddlewaretoken"}
-            return httpx.Response(303, headers={"location": f"{prefix}/"})
 
-        # ---------- edit ---------- #
-        if "/items/edit/" in path:
-            item_uuid = path.rsplit("/items/edit/", 1)[1]
-            if item_uuid not in self.items:
-                return httpx.Response(404, text="not found")
+        if not path.startswith("/api/v1/"):
+            return httpx.Response(404, json={"detail": "Not found."})
+
+        # ---------- token auth gate (every /api/v1 route) ---------- #
+        auth = request.headers.get("authorization", "")
+        if auth != f"Bearer {self.api_token}":
+            return httpx.Response(
+                401,
+                json={"detail": "Invalid or missing authentication token."},
+            )
+
+        if not self._path_allowed(path):
+            return httpx.Response(404, json={"detail": "Not found."})
+
+        rest = path.removeprefix("/api/v1/items").strip("/")
+
+        if rest == "":
             if method == "GET":
-                return httpx.Response(200, html=render_item_form(path, CSRF, self.items[item_uuid]))
+                return self._list(request)
             if method == "POST":
-                if not self._csrf_ok(data, request):
-                    return httpx.Response(403, text="CSRF verification failed")
-                errors = []
-                for required in ("name", "issuer", "redeem_code", "issue_date", "code_type"):
-                    if not data.get(required):
-                        errors.append(f"This field is required: {required}.")
-                if errors:
-                    return httpx.Response(200, html=render_item_form(path, CSRF, dict(data), errors))
-                self.items[item_uuid] = {k: v for k, v in data.items() if k != "csrfmiddlewaretoken"}
-                return httpx.Response(303, headers={"location": f"{prefix}/items/view/{item_uuid}"})
+                return self._create(body)
+            return httpx.Response(405, json={"detail": "Method not allowed."})
 
-        # ---------- item view page (toggle/edit success redirect target) ---------- #
-        if "/items/view/" in path and method == "GET":
-            return httpx.Response(200, html="<html><body>item view</body></html>")
+        parts = rest.split("/")
+        if len(parts) == 1:
+            item_id = parts[0]
+            if method == "GET":
+                return self._detail(item_id)
+            if method == "PATCH":
+                return self._patch(item_id, body)
+            if method == "DELETE":
+                return self._delete(item_id)
+            return httpx.Response(405, json={"detail": "Method not allowed."})
 
-        # ---------- toggle / delete (@require_POST upstream) ---------- #
-        if "/items/toggle_status/" in path and method == "POST":
-            item_uuid = path.rsplit("/items/toggle_status/", 1)[1]
-            if item_uuid not in self.items:
-                return httpx.Response(404, text="not found")
-            if not self._csrf_ok(data, request):
-                return httpx.Response(403, text="CSRF verification failed")
-            current = self.items[item_uuid]
-            # simulate the toggle by flipping a marker in the stored item name
-            current["name"] = (
-                current["name"].removesuffix(" [used]") + " [used]"
-                if not current["name"].endswith(" [used]")
-                else current["name"].removesuffix(" [used]")
+        if len(parts) == 2 and parts[1] == "toggle-status":
+            if method == "POST":
+                return self._toggle(parts[0])
+            return httpx.Response(405, json={"detail": "Method not allowed."})
+
+        return httpx.Response(404, json={"detail": "Not found."})
+
+    # ------------------------- endpoint impls ------------------------- #
+
+    def _list(self, request: httpx.Request) -> httpx.Response:
+        p = dict(request.url.params)
+        search = (p.get("search") or "").lower()
+        item_type = p.get("type") or ""
+        include_used = (p.get("include_used") or "false").lower() == "true"
+        include_expired = (p.get("include_expired") or "false").lower() == "true"
+        out: list[dict[str, Any]] = []
+        for raw in self.items.values():
+            item = serialize(raw)
+            if search:
+                haystack = " ".join(
+                    str(item.get(field) or "")
+                    for field in ("name", "issuer", "redeem_code")
+                ).lower()
+                if search not in haystack:
+                    continue
+            if item_type and item.get("type") != item_type:
+                continue
+            if not include_used and item.get("is_used"):
+                continue
+            days = item.get("days_left")
+            if not include_expired and days is not None and days < 0:
+                continue
+            out.append(item)
+        # ordered by expiry_date (items without expiry last)
+        out.sort(key=lambda i: i.get("expiry_date") or "9999-12-31")
+        return httpx.Response(200, json=out)
+
+    def _create(self, body: Any) -> httpx.Response:
+        if not isinstance(body, dict):
+            return httpx.Response(
+                400, json={"errors": {"non_field": ["invalid JSON body."]}}
             )
-            return httpx.Response(303, headers={"location": f"{prefix}/items/view/{item_uuid}"})
+        errors: dict[str, list[str]] = {}
+        for field in ("name", "issuer", "redeem_code", "type"):
+            if not str(body.get(field) or "").strip():
+                errors[field] = ["This field is required."]
+        if body.get("value_type") and body["value_type"] not in VALUE_TYPES:
+            errors["value_type"] = [
+                f"'{body['value_type']}' is not a valid choice."
+            ]
+        if body.get("type") and body["type"] not in ITEM_TYPES:
+            errors["type"] = [f"'{body['type']}' is not a valid choice."]
+        if errors:
+            return httpx.Response(400, json={"errors": errors})
 
-        if "/items/delete/" in path and method == "POST":
-            item_uuid = path.rsplit("/items/delete/", 1)[1]
-            if item_uuid not in self.items:
-                return httpx.Response(404, text="not found")
-            if not self._csrf_ok(data, request):
-                return httpx.Response(403, text="CSRF verification failed")
-            del self.items[item_uuid]
-            self.deleted.append(item_uuid)
-            return httpx.Response(303, headers={"location": f"{prefix}/"})
+        new_id = f"aaaaaaaa-{len(self.created_ids) + 1:04d}-1111-1111-111111111111"
+        item = {
+            "id": new_id,
+            "type": body["type"],
+            "name": body["name"],
+            "redeem_code": body["redeem_code"],
+            "code_type": body.get("code_type") or "qrcode",
+            "issuer": body.get("issuer") or "",
+            "value": str(body.get("value", "0")),
+            "value_type": body.get("value_type") or "money",
+            "currency": body.get("currency") or "EUR",
+            "issue_date": body.get("issue_date") or date.today().isoformat(),
+            "expiry_date": body.get("expiry_date") or "",
+            "description": body.get("description") or "",
+            "is_used": False,
+        }
+        self.items[new_id] = item
+        self.created_ids.append(new_id)
+        return httpx.Response(201, json=serialize(item))
 
-        return httpx.Response(404, text="not found")
+    def _detail(self, item_id: str) -> httpx.Response:
+        if item_id not in self.items:
+            return httpx.Response(404, json={"detail": "Not found."})
+        return httpx.Response(200, json=serialize(self.items[item_id]))
+
+    def _patch(self, item_id: str, body: Any) -> httpx.Response:
+        if item_id not in self.items:
+            return httpx.Response(404, json={"detail": "Not found."})
+        if not isinstance(body, dict) or not body:
+            return httpx.Response(
+                400, json={"errors": {"non_field": ["no fields to update."]}}
+            )
+        errors: dict[str, list[str]] = {}
+        if "value_type" in body and body["value_type"] not in VALUE_TYPES:
+            errors["value_type"] = [
+                f"'{body['value_type']}' is not a valid choice."
+            ]
+        if "type" in body and body["type"] not in ITEM_TYPES:
+            errors["type"] = [f"'{body['type']}' is not a valid choice."]
+        if errors:
+            return httpx.Response(400, json={"errors": errors})
+        item = self.items[item_id]
+        for key, value in body.items():
+            if key == "value":
+                item[key] = str(value)
+            else:
+                item[key] = value
+        return httpx.Response(200, json=serialize(item))
+
+    def _toggle(self, item_id: str) -> httpx.Response:
+        if item_id not in self.items:
+            return httpx.Response(404, json={"detail": "Not found."})
+        item = self.items[item_id]
+        item["is_used"] = not item["is_used"]
+        return httpx.Response(200, json=serialize(item))
+
+    def _delete(self, item_id: str) -> httpx.Response:
+        if item_id not in self.items:
+            return httpx.Response(404, json={"detail": "Not found."})
+        del self.items[item_id]
+        self.deleted_ids.append(item_id)
+        return httpx.Response(204)
 
 
 @pytest.fixture
@@ -451,9 +340,10 @@ def transport(fake_vault: FakeVault) -> httpx.MockTransport:
 @pytest.fixture
 def env(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("VOUCHERVAULT_URL", BASE)
-    monkeypatch.setenv("VOUCHERVAULT_USERNAME", USERNAME)
-    monkeypatch.setenv("VOUCHERVAULT_PASSWORD", PASSWORD)
     monkeypatch.setenv("VOUCHERVAULT_API_TOKEN", API_TOKEN)
+    # the legacy auth env vars must be irrelevant now
+    monkeypatch.delenv("VOUCHERVAULT_USERNAME", raising=False)
+    monkeypatch.delenv("VOUCHERVAULT_PASSWORD", raising=False)
     monkeypatch.delenv("VOUCHERVAULT_LANG_PREFIX", raising=False)
 
 

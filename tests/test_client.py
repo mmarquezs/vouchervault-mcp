@@ -1,4 +1,4 @@
-"""Unit tests for VoucherVaultClient (mocked HTTP via httpx.MockTransport)."""
+"""Unit tests for VoucherVaultClient (mocked token API via httpx.MockTransport)."""
 
 from __future__ import annotations
 
@@ -9,122 +9,108 @@ import pytest
 from tests.conftest import (
     API_TOKEN,
     BASE,
-    CSRF,
     ITEM_COUPON,
     ITEM_EXPIRED,
+    ITEM_LOYALTY,
     ITEM_USED,
-    PASSWORD,
-    REAL_ITEM_FORM_FIELDS,
-    USERNAME,
 )
-from vouchervault_mcp.client import (
-    ITEM_FORM_FIELDS,
-    VoucherVaultClient,
-    VoucherVaultError,
-)
+from vouchervault_mcp.client import VoucherVaultClient, VoucherVaultError
 
 
-async def test_form_fields_match_upstream_forms_py():
-    """The client's known form fields must be EXACTLY the ItemForm.Meta.fields
-    list fetched from upstream myapp/forms.py (see conftest for the source)."""
-    assert list(ITEM_FORM_FIELDS) == REAL_ITEM_FORM_FIELDS
+def _base_create_fields() -> dict:
+    return {
+        "name": "New Coupon",
+        "issuer": "amazon.es",
+        "redeem_code": "NEW-CODE-1",
+        "expiry_date": "2027-01-01",
+        "value": 10.0,
+        "value_type": "money",
+        "type": "coupon",
+        "currency": "EUR",
+        "description": "",
+    }
 
 
-async def test_login_csrf_flow(client: VoucherVaultClient, fake_vault):
-    await client.login()
+async def test_bearer_token_sent_on_every_call(client: VoucherVaultClient, fake_vault):
+    await client.list_items()
+    await client.get_item(ITEM_COUPON)
+    await client.create_item(_base_create_fields())
+    await client.update_item(ITEM_COUPON, {"description": "x"})
+    await client.toggle_status(ITEM_COUPON)
+    await client.delete_item(ITEM_COUPON)
 
-    login_gets = fake_vault.calls("GET", "/en/accounts/login/")
-    assert len(login_gets) == 1
-
-    posts = fake_vault.calls("POST", "/en/accounts/login/")
-    assert len(posts) == 1
-    post = posts[0]
-    # CSRF token parsed from the login page form and sent back
-    assert post["data"]["csrfmiddlewaretoken"] == CSRF
-    assert post["data"]["username"] == USERNAME
-    assert post["data"]["password"] == PASSWORD
-    # Django CSRF over https needs Origin/Referer
-    assert post["headers"]["origin"] == BASE
-    assert post["headers"]["referer"] == f"{BASE}/"
-
-    # authenticated dashboard fetch verifies the session
-    assert any(r["path"] == "/en/" and r["method"] == "GET" for r in fake_vault.requests)
+    api_calls = [r for r in fake_vault.requests if r["path"].startswith("/api/v1")]
+    assert len(api_calls) == 6
+    for r in api_calls:
+        assert r["headers"]["authorization"] == f"Bearer {API_TOKEN}"
 
 
-async def test_login_bad_credentials_raises_with_oidc_hint(fake_vault, transport, env, monkeypatch):
-    monkeypatch.setenv("VOUCHERVAULT_PASSWORD", "definitely-wrong")
-    client = VoucherVaultClient(transport=transport)
-    with pytest.raises(VoucherVaultError) as exc:
-        await client.login()
-    assert "OIDC" in exc.value.message
-    # the wrong password value must never appear in error text
-    assert "definitely-wrong" not in exc.value.message
+async def test_list_items_returns_server_payload(client: VoucherVaultClient):
+    items = await client.list_items(include_used=True, include_expired=True)
+    assert len(items) == 4
+    # server-provided fields come through untouched (value is a string,
+    # days_left computed server-side — no local recomputation)
+    coupon = next(i for i in items if i["id"] == ITEM_COUPON)
+    assert coupon["value"] == "25.00"
+    assert coupon["days_left"] == 30
+    assert coupon["is_used"] is False
 
 
-async def test_get_stats_success(client: VoucherVaultClient, fake_vault):
-    stats = await client.get_stats()
-    calls = fake_vault.calls("GET", "/en/api/get/stats")
+async def test_list_items_ordered_by_expiry_date(client: VoucherVaultClient):
+    items = await client.list_items(include_used=True, include_expired=True)
+    dates = [i["expiry_date"] for i in items]
+    assert dates == sorted(dates)
+
+
+async def test_list_items_filter_params_passthrough(client: VoucherVaultClient, fake_vault):
+    await client.list_items(
+        search="amazon",
+        item_type="coupon",
+        include_used=True,
+        include_expired=True,
+        username="admin",
+    )
+    calls = [
+        r for r in fake_vault.requests if r["method"] == "GET" and r["path"] == "/api/v1/items"
+    ]
     assert len(calls) == 1
-    assert calls[0]["headers"]["authorization"] == f"Bearer {API_TOKEN}"
-    assert len(stats["item_details"]) == 4
+    params = calls[0]["params"]
+    assert params["search"] == "amazon"
+    assert params["type"] == "coupon"
+    assert params["include_used"] == "true"
+    assert params["include_expired"] == "true"
+    assert params["username"] == "admin"
 
 
-async def test_get_stats_bad_token_clear_error(monkeypatch, transport, env):
-    monkeypatch.setenv("VOUCHERVAULT_API_TOKEN", "bad-token-value")
-    client = VoucherVaultClient(transport=transport)
-    with pytest.raises(VoucherVaultError) as exc:
-        await client.get_stats()
-    assert exc.value.status_code == 403
-    assert "VOUCHERVAULT_API_TOKEN" in exc.value.message
-    # token must be scrubbed from any surfaced error text
-    assert "bad-token-value" not in exc.value.message
+async def test_list_items_default_flags_sent_false(client: VoucherVaultClient, fake_vault):
+    await client.list_items()
+    call = fake_vault.calls("GET", "/api/v1/items")[0]
+    assert call["params"]["include_used"] == "false"
+    assert call["params"]["include_expired"] == "false"
+    assert "search" not in call["params"]
+    assert "type" not in call["params"]
 
 
-async def test_get_stats_missing_token(monkeypatch, transport):
-    monkeypatch.setenv("VOUCHERVAULT_URL", BASE)
-    monkeypatch.setenv("VOUCHERVAULT_USERNAME", USERNAME)
-    monkeypatch.setenv("VOUCHERVAULT_PASSWORD", PASSWORD)
-    monkeypatch.delenv("VOUCHERVAULT_API_TOKEN", raising=False)
-    client = VoucherVaultClient(transport=transport)
-    with pytest.raises(VoucherVaultError) as exc:
-        await client.get_stats()
-    assert "VOUCHERVAULT_API_TOKEN" in exc.value.message
-
-
-async def test_list_items_default_hides_used_and_expired(client: VoucherVaultClient):
-    items = await client.list_items()
-    names = [item["name"] for item in items]
+async def test_list_items_server_side_filtering_honored(client: VoucherVaultClient):
+    names = [i["name"] for i in await client.list_items()]
     assert "El Corte Ingles Gift" not in names  # used
     assert "Old Voucher" not in names  # expired
     assert "Amazon 10EUR" in names
-    assert "Loyalty Card" in names
-    # annotation + coercion
-    coupon = next(i for i in items if i["name"] == "Amazon 10EUR")
-    assert coupon["days_left"] == 30
-    assert isinstance(coupon["value"], float)
 
-
-async def test_list_items_search_over_name_issuer_redeem_code(client: VoucherVaultClient):
-    assert [i["id"] for i in await client.list_items(search="amazon")] == [ITEM_COUPON]
-    assert [i["id"] for i in await client.list_items(search="zalando", include_expired=True)] == [ITEM_EXPIRED]
-    assert [i["id"] for i in await client.list_items(search="eci-gift", include_used=True)] == [ITEM_USED]
-    assert len(await client.list_items(search="nomatch-xyz", include_used=True, include_expired=True)) == 0
-
-
-async def test_list_items_type_and_flags(client: VoucherVaultClient):
     types = {i["type"] for i in await client.list_items(item_type="coupon")}
     assert types == {"coupon"}
 
-    used = await client.list_items(include_used=True)
-    assert any(i["id"] == ITEM_USED for i in used)
-
     expired = await client.list_items(include_expired=True)
     old = next(i for i in expired if i["id"] == ITEM_EXPIRED)
-    assert old["days_left"] < 0
     assert old["days_left"] == (date.fromisoformat("2020-01-01") - date.today()).days
 
     everything = await client.list_items(include_used=True, include_expired=True)
-    assert len(everything) == 4
+    assert {i["id"] for i in everything} == {
+        ITEM_COUPON,
+        ITEM_USED,
+        ITEM_EXPIRED,
+        ITEM_LOYALTY,
+    }
 
 
 async def test_get_item_found_and_missing(client: VoucherVaultClient):
@@ -134,167 +120,170 @@ async def test_get_item_found_and_missing(client: VoucherVaultClient):
     assert await client.get_item("99999999-9999-9999-9999-999999999999") is None
 
 
-async def test_create_post_payload_field_names(client: VoucherVaultClient, fake_vault):
-    fields = {
-        "name": "New Coupon",
-        "issuer": "amazon.es",
-        "redeem_code": "NEW-CODE-1",
-        "type": "coupon",
-        "value": 10.0,
-        "value_type": "money",
-        "currency": "EUR",
-        "expiry_date": "",
-        "description": "",
-        "issue_date": date.today().isoformat(),
-        "code_type": "qrcode",
-    }
-    await client.create_item(fields)
+async def test_create_payload_and_returned_item(client: VoucherVaultClient, fake_vault):
+    fields = _base_create_fields()
+    created = await client.create_item(fields)
 
-    posts = fake_vault.calls("POST", "/en/items/create/")
+    posts = fake_vault.calls("POST", "/api/v1/items/")
     assert len(posts) == 1
     post = posts[0]
-    sent = set(post["data"]) - {"csrfmiddlewaretoken"}
-    # every posted field must be a real ItemForm field from upstream forms.py
-    assert sent <= set(REAL_ITEM_FORM_FIELDS)
-    # required ItemForm fields are all present
-    assert {
-        "name",
-        "issuer",
-        "redeem_code",
-        "type",
-        "value",
-        "value_type",
-        "currency",
-        "issue_date",
-        "code_type",
-    } <= sent
-    assert post["data"]["csrfmiddlewaretoken"] == CSRF
-    assert post["headers"]["x-csrftoken"] == CSRF
-    assert post["headers"]["origin"] == BASE
-    assert post["data"]["value"] == "10.0"
+    # JSON body with exactly the documented keys; `type` is the server-side name
+    assert set(post["json"]) == set(fields)
+    assert post["json"]["type"] == "coupon"
+    assert post["json"]["value"] == 10.0
+    # 201 + serialized item echoed back
+    assert created["id"].startswith("aaaaaaaa-")
+    assert created["value"] == "10.0"
+    assert created["is_used"] is False
+    assert created["id"] in fake_vault.created_ids
+
+
+async def test_create_item_type_alias_mapped_to_type(client: VoucherVaultClient, fake_vault):
+    fields = _base_create_fields()
+    fields.pop("type")
+    fields["item_type"] = "voucher"
+    created = await client.create_item(fields)
+    post = fake_vault.calls("POST", "/api/v1/items/")[0]
+    assert post["json"]["type"] == "voucher"
+    assert "item_type" not in post["json"]
+    assert created["type"] == "voucher"
 
 
 async def test_create_unknown_field_rejected(client: VoucherVaultClient):
+    fields = _base_create_fields()
+    fields["not_a_real_field"] = "y"
     with pytest.raises(VoucherVaultError):
-        await client.create_item({"name": "x", "not_a_form_field": "y"})
+        await client.create_item(fields)
 
 
-async def test_create_validation_failure_surfaces_errors(client: VoucherVaultClient):
+async def test_create_400_error_payload_propagated(client: VoucherVaultClient, fake_vault):
+    # omit required fields -> fake returns 400 {"errors": {...}}
+    fields = _base_create_fields()
+    fields.pop("name")
+    fields.pop("type")
     with pytest.raises(VoucherVaultError) as exc:
-        await client.create_item(
-            {
-                "issuer": "amazon.es",
-                "redeem_code": "X",
-                "type": "coupon",
-                "value": 10.0,
-                "value_type": "money",
-                "currency": "EUR",
-                "expiry_date": "",
-                "description": "",
-                "issue_date": "2026-09-05",
-                "code_type": "qrcode",
-            }
-        )
+        await client.create_item(fields)
+    assert exc.value.status_code == 400
+    assert exc.value.errors is not None
+    assert "name" in exc.value.errors
+    assert "type" in exc.value.errors
+    # the rendered message carries the server's error detail
     assert "required" in exc.value.message.lower()
 
 
-async def test_edit_merges_current_values_and_posts_all_fields(client: VoucherVaultClient, fake_vault):
-    await client.edit_item(ITEM_COUPON, {"value": 30, "description": "updated"})
+async def test_update_partial_payload_only_changed_fields(client: VoucherVaultClient, fake_vault):
+    updated = await client.update_item(ITEM_COUPON, {"value": 30, "description": "upd"})
 
-    posts = fake_vault.calls("POST", f"/en/items/edit/{ITEM_COUPON}")
-    assert len(posts) == 1
-    post = posts[0]
-    sent = set(post["data"]) - {"csrfmiddlewaretoken"}
-    # ALL form fields (except the file upload) must be sent back
-    expected = set(REAL_ITEM_FORM_FIELDS) - {"file"}
-    assert expected <= sent
-    # changed fields applied
-    assert post["data"]["value"] == "30"
-    assert post["data"]["description"] == "updated"
-    # unchanged fields preserved from the GET form
-    assert post["data"]["name"] == "Amazon 10EUR"
-    assert post["data"]["issuer"] == "amazon.es"
-    assert post["data"]["issue_date"] == "2026-01-01"
-    assert post["data"]["csrfmiddlewaretoken"] == CSRF
+    patches = fake_vault.calls("PATCH", f"/api/v1/items/{ITEM_COUPON}")
+    assert len(patches) == 1
+    # partial update: ONLY the provided fields are in the body
+    assert set(patches[0]["json"]) == {"value", "description"}
+    assert patches[0]["json"]["value"] == 30
+    assert updated["value"] == "30"
+    assert updated["description"] == "upd"
+    # untouched fields preserved server-side
+    assert updated["name"] == "Amazon 10EUR"
 
 
-async def test_edit_missing_item_404(client: VoucherVaultClient):
+async def test_update_missing_item_404(client: VoucherVaultClient):
     with pytest.raises(VoucherVaultError) as exc:
-        await client.edit_item("88888888-8888-8888-8888-888888888888", {"name": "x"})
+        await client.update_item("88888888-8888-8888-8888-888888888888", {"name": "x"})
     assert exc.value.status_code == 404
 
 
-async def test_toggle_status_call_shape(client: VoucherVaultClient, fake_vault):
-    await client.toggle_status(ITEM_COUPON)
-    posts = fake_vault.calls("POST", f"/en/items/toggle_status/{ITEM_COUPON}")
-    assert len(posts) == 1
-    assert posts[0]["method"] == "POST"
-    assert posts[0]["headers"]["x-csrftoken"] == CSRF
-    assert posts[0]["headers"]["origin"] == BASE
-    # name marker flipped by the fake proves the toggle reached the backend
-    assert "[used]" in fake_vault.items[ITEM_COUPON]["name"]
+async def test_toggle_status_flips_and_returns_item(client: VoucherVaultClient, fake_vault):
+    first = await client.toggle_status(ITEM_COUPON)
+    assert first["is_used"] is True
+    second = await client.toggle_status(ITEM_COUPON)
+    assert second["is_used"] is False
+    toggles = fake_vault.calls("POST", f"/api/v1/items/{ITEM_COUPON}/toggle-status/")
+    assert len(toggles) == 2
 
 
-async def test_delete_call_shape(client: VoucherVaultClient, fake_vault):
-    await client.delete_item(ITEM_COUPON)
-    posts = fake_vault.calls("POST", f"/en/items/delete/{ITEM_COUPON}")
-    assert len(posts) == 1
-    assert posts[0]["method"] == "POST"
-    assert posts[0]["headers"]["x-csrftoken"] == CSRF
-    assert ITEM_COUPON in fake_vault.deleted
-
-
-async def test_delete_missing_item_404(client: VoucherVaultClient):
+async def test_toggle_missing_item_404(client: VoucherVaultClient):
     with pytest.raises(VoucherVaultError) as exc:
-        await client.delete_item("77777777-7777-7777-7777-777777777777")
+        await client.toggle_status("77777777-7777-7777-7777-777777777777")
     assert exc.value.status_code == 404
 
 
-async def test_session_expiry_on_write_triggers_single_relogin(client: VoucherVaultClient, fake_vault):
-    await client.login()
-    logins_before = len(fake_vault.calls("POST", "/en/accounts/login/"))
-    # next write GET is bounced to the login page -> client re-logins and retries
-    fake_vault.force_login_redirect_get = 1
-    await client.edit_item(ITEM_COUPON, {"description": "after relogin"})
-    logins_after = len(fake_vault.calls("POST", "/en/accounts/login/"))
-    assert logins_after == logins_before + 1
-    posts = fake_vault.calls("POST", f"/en/items/edit/{ITEM_COUPON}")
-    assert len(posts) == 1
-    assert posts[0]["data"]["description"] == "after relogin"
-
-
-async def test_session_expiry_on_post_triggers_single_relogin(client: VoucherVaultClient, fake_vault):
-    await client.login()
-    logins_before = len(fake_vault.calls("POST", "/en/accounts/login/"))
-    fake_vault.force_login_redirect_post = 1
+async def test_delete_success_and_missing_404(client: VoucherVaultClient, fake_vault):
     await client.delete_item(ITEM_COUPON)
-    logins_after = len(fake_vault.calls("POST", "/en/accounts/login/"))
-    assert logins_after == logins_before + 1
-    assert ITEM_COUPON in fake_vault.deleted
+    deletes = fake_vault.calls("DELETE", f"/api/v1/items/{ITEM_COUPON}")
+    assert len(deletes) == 1
+    assert ITEM_COUPON in fake_vault.deleted_ids
+
+    with pytest.raises(VoucherVaultError) as exc:
+        await client.delete_item(ITEM_COUPON)  # now gone
+    assert exc.value.status_code == 404
 
 
-async def test_lang_prefix_fallback_when_en_404s(fake_vault, transport, env):
-    fake_vault.prefix_mode = "none"
+async def test_401_wrong_token_clear_error(monkeypatch, transport, env):
+    monkeypatch.setenv("VOUCHERVAULT_API_TOKEN", "bad-token-value")
     client = VoucherVaultClient(transport=transport)
-    await client.login()
-    assert client._prefix == ""
-    assert fake_vault.calls("GET", "/accounts/login/")
-    # stats API is also served without prefix now
-    await client.get_stats()
-    assert fake_vault.calls("GET", "/api/get/stats")
+    with pytest.raises(VoucherVaultError) as exc:
+        await client.list_items()
+    assert exc.value.status_code == 401
+    assert "VOUCHERVAULT_API_TOKEN" in exc.value.message
+    # the wrong token value must never appear in the surfaced error text
+    assert "bad-token-value" not in exc.value.message
 
 
-async def test_stats_user_param_passed(client: VoucherVaultClient, fake_vault):
-    await client.get_stats(user=USERNAME)
-    call = fake_vault.calls("GET", "/en/api/get/stats")[0]
-    assert call["params"] == {"user": USERNAME}
+async def test_missing_env_vars_fail_fast(transport, monkeypatch):
+    monkeypatch.setenv("VOUCHERVAULT_URL", BASE)
+    monkeypatch.delenv("VOUCHERVAULT_API_TOKEN", raising=False)
+    with pytest.raises(ValueError) as exc:
+        VoucherVaultClient(transport=transport)
+    assert "VOUCHERVAULT_API_TOKEN" in str(exc.value)
+
+    monkeypatch.setenv("VOUCHERVAULT_API_TOKEN", API_TOKEN)
+    monkeypatch.delenv("VOUCHERVAULT_URL", raising=False)
+    with pytest.raises(ValueError) as exc:
+        VoucherVaultClient(transport=transport)
+    assert "VOUCHERVAULT_URL" in str(exc.value)
 
 
-async def test_expired_filter_uses_today(client: VoucherVaultClient):
-    """days_left is annotated relative to today (fake coupon expires today+30)."""
-    items = await client.list_items()
-    coupon = next(i for i in items if i["id"] == ITEM_COUPON)
-    assert coupon["days_left"] == (
-        date.fromisoformat(str(coupon["expiry_date"])[:10]) - date.today()
-    ).days
-    assert coupon["days_left"] == 30
+async def test_token_scrubbed_from_exception_text(client: VoucherVaultClient, fake_vault):
+    # server error body echoes the Authorization header — must be scrubbed
+    fake_vault.leak_auth_on_next = True
+    with pytest.raises(VoucherVaultError) as exc:
+        await client.get_item(ITEM_COUPON)
+    assert exc.value.status_code == 500
+    assert API_TOKEN not in exc.value.message
+    assert "Bearer ***" in exc.value.message
+
+
+async def test_trailing_slash_retry_when_only_noslash_exists(fake_vault, transport, env):
+    # server serves only /api/v1/items (no trailing slash)
+    fake_vault.slash_mode = "noslash"
+    c = VoucherVaultClient(transport=transport)
+    created = await c.create_item(_base_create_fields())
+    assert created["id"] in fake_vault.created_ids
+    assert fake_vault.calls("POST", "/api/v1/items")
+
+    # non-404-on-both: after both variants 404 the client raises a 404 error
+    with pytest.raises(VoucherVaultError) as exc:
+        await c.delete_item("99999999-9999-9999-9999-999999999999")
+    assert exc.value.status_code == 404
+
+
+async def test_trailing_slash_retry_when_only_slash_exists(fake_vault, transport, env):
+    # server serves only the slashed variant -> canonical no-slash GET list
+    # must be retried with the slash and succeed
+    fake_vault.slash_mode = "slash"
+    c = VoucherVaultClient(transport=transport)
+    items = await c.list_items(include_used=True, include_expired=True)
+    assert len(items) == 4
+    assert fake_vault.calls("GET", "/api/v1/items/")
+
+
+async def test_legacy_session_env_vars_are_ignored(fake_vault, transport, monkeypatch):
+    # old deployment env must neither be required nor break anything
+    monkeypatch.setenv("VOUCHERVAULT_URL", BASE)
+    monkeypatch.setenv("VOUCHERVAULT_API_TOKEN", API_TOKEN)
+    monkeypatch.setenv("VOUCHERVAULT_USERNAME", "leftover-user")
+    monkeypatch.setenv("VOUCHERVAULT_PASSWORD", "leftover-pass")
+    monkeypatch.setenv("VOUCHERVAULT_LANG_PREFIX", "/en")
+    c = VoucherVaultClient(transport=transport)
+    items = await c.list_items(include_used=True)
+    assert isinstance(items, list)
+    assert all("/api/v1" in r["path"] for r in fake_vault.requests)

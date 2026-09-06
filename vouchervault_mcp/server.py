@@ -3,20 +3,19 @@
 Tools:
   - coupons_list     — list/search vouchers, coupons, gift cards, loyalty cards
   - coupon_get       — get single item details by id
-  - coupon_create    — create a new item (web form post)
-  - coupon_update    — update item fields by id (web form post)
+  - coupon_create    — create a new item
+  - coupon_update    — update item fields by id (partial)
   - coupon_mark_used — toggle used/available status
   - coupon_delete    — delete an item
 
-Reads use the Bearer-token stats API; writes are session+CSRF form posts
-(see client.py — upstream has no write REST API).
+All tools talk to the token-authenticated extapi overlay API
+(Authorization: Bearer on every call — see client.py).
 """
 
 from __future__ import annotations
 
 import os
 import sys
-from datetime import date
 from typing import Any
 
 from fastmcp import FastMCP
@@ -109,7 +108,7 @@ async def coupon_create(
     (upstream then sets it 50 years out). `value_type` is one of
     money | percentage | multiplier (percentage 0-100, multiplier >= 1).
     `item_type` is one of voucher | giftcard | coupon | loyaltycard
-    (loyalty cards require value 0).
+    (loyalty cards require value 0). Returns the created item.
     """
     if item_type not in ITEM_TYPES:
         raise VoucherVaultError(
@@ -119,35 +118,21 @@ async def coupon_create(
         raise VoucherVaultError(
             f"invalid value_type '{value_type}' — expected one of {list(VALUE_TYPES)}"
         )
-    fields: dict[str, Any] = {
+    body: dict[str, Any] = {
         "name": name,
         "issuer": issuer,
         "redeem_code": redeem_code,
-        "type": item_type,
+        "expiry_date": expiry_date,
         "value": value,
         "value_type": value_type,
+        "type": item_type,
         "currency": currency,
-        "expiry_date": expiry_date,
         "description": description,
-        # defaults matching the web UI for required fields the tool
-        # signature does not expose
-        "issue_date": date.today().isoformat(),
-        "code_type": "qrcode",
     }
     if item_type == "loyaltycard":
-        fields["value"] = 0
+        body["value"] = 0
 
-    client = _client()
-    await client.create_item(fields)
-    # best effort: return the created item from the stats API
-    try:
-        items = await client.list_items(search=name, include_used=True)
-        for item in items:
-            if item.get("name") == name and item.get("redeem_code") == redeem_code:
-                return item
-    except VoucherVaultError:
-        pass
-    return {"status": "created", "name": name, "issuer": issuer}
+    return await _client().create_item(body)
 
 
 @mcp.tool
@@ -166,6 +151,7 @@ async def coupon_update(
 
     Editable: name, issuer, redeem_code, expiry_date (YYYY-MM-DD),
     description, currency, value, value_type (money | percentage | multiplier).
+    Returns the updated item.
     """
     changed: dict[str, Any] = {}
     if name is not None:
@@ -191,12 +177,7 @@ async def coupon_update(
     if not changed:
         raise VoucherVaultError("no fields provided to update")
 
-    client = _client()
-    await client.edit_item(item_id, changed)
-    item = await client.get_item(item_id)
-    if item is None:
-        return {"status": "updated", "item_id": item_id}
-    return item
+    return await _client().update_item(item_id, changed)
 
 
 @mcp.tool
@@ -206,12 +187,7 @@ async def coupon_mark_used(item_id: str) -> dict:
     Calling this once marks the item as USED; calling it again marks it
     available again. The returned item reflects the new state.
     """
-    client = _client()
-    await client.toggle_status(item_id)
-    item = await client.get_item(item_id)
-    if item is None:
-        return {"status": "toggled", "item_id": item_id}
-    return item
+    return await _client().toggle_status(item_id)
 
 
 @mcp.tool
@@ -224,7 +200,7 @@ async def coupon_delete(item_id: str) -> dict:
 def _require_env() -> None:
     missing = [
         var
-        for var in ("VOUCHERVAULT_URL", "VOUCHERVAULT_USERNAME", "VOUCHERVAULT_PASSWORD")
+        for var in ("VOUCHERVAULT_URL", "VOUCHERVAULT_API_TOKEN")
         if not os.environ.get(var)
     ]
     if missing:
@@ -232,12 +208,12 @@ def _require_env() -> None:
             "vouchervault-mcp: missing required environment variables: "
             + ", ".join(missing)
             + "\n"
-            "Set VOUCHERVAULT_URL (e.g. https://vouchervault.example.com), "
-            "VOUCHERVAULT_USERNAME and VOUCHERVAULT_PASSWORD (a LOCAL Django "
-            "account — OIDC users cannot password-login). Also set "
-            "VOUCHERVAULT_API_TOKEN (Bearer token for the read API, generated "
-            "in the VoucherVault Django admin). Optionally set "
-            "VOUCHERVAULT_LANG_PREFIX (default /en).",
+            "Set VOUCHERVAULT_URL to the internal VoucherVault container URL "
+            "(e.g. http://10.0.0.194:8000) and VOUCHERVAULT_API_TOKEN to the "
+            "Bearer token accepted by the token API (the same token as the "
+            "read stats endpoint, generated in the VoucherVault Django "
+            "admin). No session/CSRF login is used and no local Django user "
+            "is needed.",
             file=sys.stderr,
         )
         raise SystemExit(1)
