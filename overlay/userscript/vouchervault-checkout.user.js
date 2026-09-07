@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         VoucherVault Checkout Reminder
 // @namespace    https://curiositystream.stream/
-// @version      1.5.1
+// @version      1.5.2
 // @description  Shows VoucherVault coupon codes matching the merchant you are currently visiting (checkout reminder)
 // @license      MIT
 // @match        https://*/*
@@ -56,6 +56,17 @@
   const INTRO_AUTOCOLLAPSE_MS = 4000;
   const POS_KEY = "vv-pos:";
   const INTRO_KEY = "vv-intro:";
+  // v1.5.2 mobile tap fix: a touch tap fires its compatibility click AFTER
+  // touchend — i.e. after the pointerup-activation has already swapped the
+  // pill for the panel — so the stray click lands on whatever is now under
+  // the finger (historically the panel's "Hide until tomorrow" button, which
+  // made a tap look like a day-dismissal). Swallow clicks for a short window
+  // after every tap-activation, and debounce activation itself.
+  const CLICK_SUPPRESS_MS = 400;      // window in which post-activation stray clicks are swallowed
+  const ACTIVATION_DEBOUNCE_MS = 250; // ignore re-activation within this window
+  let suppressClickUntil = 0;
+  let lastActivateAt = 0;
+  let postToggleGuardUntil = 0;       // touch: swallow off-host clicks right after a toggle
 
   // --------------------------------------------------- GM API compatibility
   // Greasemonkey 4 renamed the sync GM_* APIs to async GM.* ones. Support both.
@@ -441,6 +452,23 @@
     applyTheme(root, dark);
     shadow.appendChild(root);
 
+    // Click guards (v1.5.2), both on the host element (a real element, unlike
+    // the shadow root):
+    // - Capture phase: within the post-activation suppression window, swallow
+    //   the stray synthetic click a touch tap fires after the pill/panel swap
+    //   before it can reach shadow content (e.g. "Hide until tomorrow").
+    // - Bubble phase: clicks that originate inside the shadow tree must never
+    //   leak to the page beneath (tap-through navigation / page handlers).
+    //   Buttons keep working because their own listeners run in the target
+    //   phase, before this bubble listener.
+    host.addEventListener("click", (e) => {
+      if (Date.now() < suppressClickUntil) {
+        e.preventDefault();
+        e.stopImmediatePropagation();
+      }
+    }, true);
+    host.addEventListener("click", (e) => e.stopPropagation(), false);
+
     return { host, shadow, root };
   }
 
@@ -544,6 +572,15 @@
       try { handle.setPointerCapture(e.pointerId); } catch (_) { /* capture is best-effort */ }
     });
 
+    // Cancel the touch gesture's compatibility click at the source. On touch,
+    // ALL compat mouse events (mousedown/mouseup/click) fire after the gesture
+    // ends — after the toggle has already swapped pill/panel. When a collapse
+    // leaves nothing of ours under the finger, that click hit-tests straight
+    // onto the PAGE (link navigation, page handlers). Activation is pointer
+    // based, so we never need the compat click: preventDefault on touchend
+    // suppresses it. (touch-action:none keeps scrolling off these handles.)
+    handle.addEventListener("touchend", (e) => e.preventDefault(), { passive: false });
+
     handle.addEventListener("pointermove", (e) => {
       if (!active || e.pointerId !== pointerId) return;
       const dx = e.clientX - startX;
@@ -567,6 +604,15 @@
       if (moved) {
         persistPosition();
       } else if (onActivate) {
+        // Tap-activation: the browser still owes us a compatibility click for
+        // this touch (fired after touchend, when the pill may already be
+        // swapped for the panel). Arm the suppression window so the makeShadow
+        // Host capture guard swallows it wherever it lands.
+        suppressClickUntil = Date.now() + CLICK_SUPPRESS_MS;
+        // Touch also needs the post-toggle document guard below: when the
+        // toggle REMOVES our UI from under the finger (collapse), the very
+        // next rapid tap lands on the page itself.
+        if (e.pointerType !== "mouse") postToggleGuardUntil = suppressClickUntil;
         onActivate();
       }
     });
@@ -574,12 +620,31 @@
     handle.addEventListener("pointercancel", (e) => {
       if (!active || e.pointerId !== pointerId) return;
       active = false;
+      moved = false;
       handle.style.cursor = "";
       release(e);
-      // A cancelled gesture keeps a partial drag's position but never toggles.
-      if (moved) persistPosition();
+      // A cancelled gesture (browser claimed the touch, e.g. for scrolling)
+      // never toggles and never persists: any live-applied offsets were
+      // clamped in place and simply revert to the last persisted position on
+      // the next render. This keeps a cancelled scroll from parking the pill
+      // at an arbitrary (possibly edge-hugging) spot.
     });
   }
+
+  // Post-toggle tap-through guard (v1.5.2, touch only): when a toggle removes
+  // our UI from under the finger (collapse), a rapid follow-up tap starts on
+  // the PAGE where the panel just was — our host never sees it. Within the
+  // short guard window, treat it as part of the same gesture and swallow it
+  // before it can trigger navigation or page click handlers. Best-effort by
+  // design: page capture handlers registered before us still observe the
+  // event, but no default action (link navigation) can run.
+  document.addEventListener("click", (e) => {
+    if (Date.now() >= postToggleGuardUntil) return;
+    const host = panelCtl && panelCtl.host;
+    if (host && e.composedPath().includes(host)) return; // our own tree — handled by the host guards
+    e.preventDefault();
+    e.stopImmediatePropagation();
+  }, true);
 
   // ------------------------------------------------------- SPA URL watching
 
@@ -773,7 +838,12 @@
       expanded.style.display = open ? "block" : "none";
     };
     // A click cancels the pending 4s intro auto-collapse, then toggles.
+    // Debounced (v1.5.2): pointerup-activation plus any residual synthetic
+    // path can only ever toggle once per gesture.
     const toggle = () => {
+      const now = Date.now();
+      if (now - lastActivateAt < ACTIVATION_DEBOUNCE_MS) return;
+      lastActivateAt = now;
       cancelIntroTimer();
       setExpanded(!open);
     };
@@ -815,6 +885,9 @@
     // OffsetWidth is only measurable once attached — apply (and clamp) the
     // saved position immediately after the host enters the DOM.
     setHostPosition(host, savedRight, savedBottom);
+    // Compact mobile sizing: the class MUST go on `root` — a real div inside
+    // the shadow tree — so the .vv-mobile rules match .pill/.panel as
+    // descendants. (Shadow roots themselves are not elements.)
     root.classList.toggle("vv-mobile", isMobileViewport());
 
     // One subtle pulse per browser session, collapsed non-checkout pill
