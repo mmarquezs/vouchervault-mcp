@@ -1,0 +1,12 @@
+diff --git a/myapp/utils.py b/myapp/utils.py
+--- a/myapp/utils.py
++++ b/myapp/utils.py
+@@ -20,7 +20,7 @@
+     Fetch latest exchange rates from Fixer.io (EUR base, free plan).
+     Returns a dict of {currency_code: rate} or None on failure.
+     """
+-    url = f"https://data.fixer.io/api/latest?access_key={api_key}"
++    url = f"http://fixer-proxy/api/latest?access_key={api_key}"
+     try:
+         with urllib.request.urlopen(url, timeout=5) as response:  # nosec B310 — URL scheme is hardcoded to http://
+             data = json.loads(response.read().decode())
