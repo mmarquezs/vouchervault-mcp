@@ -79,7 +79,9 @@ async def test_require_env_ok(monkeypatch):
 
 async def test_coupons_list_compact_projection(client_factory):
     coupons_list = await get_tool("coupons_list")
-    items = await coupons_list(include_used=True, include_expired=True)
+    result = await coupons_list(include_used=True, include_expired=True)
+    assert set(result) == {"items"}
+    items = result["items"]
     assert len(items) == 4
     for item in items:
         assert set(item) == COMPACT_KEYS
@@ -88,10 +90,24 @@ async def test_coupons_list_compact_projection(client_factory):
 
 async def test_coupons_list_filters(client_factory):
     coupons_list = await get_tool("coupons_list")
-    assert len(await coupons_list()) == 2  # used + expired hidden by default
-    assert len(await coupons_list(item_type="coupon")) == 1
+    assert len((await coupons_list())["items"]) == 2  # used + expired hidden by default
+    assert len((await coupons_list(item_type="coupon"))["items"]) == 1
     with pytest.raises(VoucherVaultError):
         await coupons_list(item_type="bogus")
+
+
+async def test_coupons_list_structured_content_is_dict(client_factory):
+    """Regression: FastMCP structured content must be a dict — a bare list
+    fails validation with 'structured_content must be a dict or None. Got
+    list' (HTTP 500 through the 1mcp gateway)."""
+    from fastmcp import Client
+
+    async with Client(server.mcp) as mcp_client:
+        result = await mcp_client.call_tool("coupons_list", {})
+    assert not result.is_error
+    assert isinstance(result.structured_content, dict)
+    assert set(result.structured_content) == {"items"}
+    assert len(result.structured_content["items"]) == 2
 
 
 async def test_coupon_get(client_factory):
