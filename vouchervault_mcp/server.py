@@ -57,7 +57,7 @@ async def coupons_list(
     item_type: str | None = None,
     include_used: bool = False,
     include_expired: bool = False,
-) -> list[dict]:
+) -> dict:
     """List vouchers, coupons, gift cards and loyalty cards.
 
     Use `search` for substring matching over name, issuer and redeem_code.
@@ -65,6 +65,9 @@ async def coupons_list(
     By default used and expired items are hidden; enable them with
     `include_used` / `include_expired`. Each item includes `days_left`
     (negative means expired).
+
+    Returns ``{"items": [...]}`` — FastMCP structured content requires a
+    dict, so the bare array from the API is wrapped.
     """
     if item_type is not None and item_type not in ITEM_TYPES:
         raise VoucherVaultError(
@@ -76,7 +79,7 @@ async def coupons_list(
         include_used=include_used,
         include_expired=include_expired,
     )
-    return [_compact(item) for item in items]
+    return {"items": [_compact(item) for item in items]}
 
 
 @mcp.tool
